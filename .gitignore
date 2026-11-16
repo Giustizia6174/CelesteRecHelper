@@ -1,0 +1,16 @@
+# .NET 构建输出
+bin/
+obj/
+*.user
+.vs/
+
+# 打包产物与随包工具
+dist/
+tools/*.exe
+tools/*.dll
+
+# 录像素材与本地数据
+*.mkv
+*.mp4
+*.mov
+.rechelper/

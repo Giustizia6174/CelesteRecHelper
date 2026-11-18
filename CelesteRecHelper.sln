@@ -1,0 +1,50 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{20FB8563-BCA0-4696-B712-5A05C577B923}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CelesteRecHelper", "src\CelesteRecHelper\CelesteRecHelper.csproj", "{E5A19987-49AC-48D5-B5A8-EFB9EAA6D232}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CelesteRecHelper.Core", "src\CelesteRecHelper.Core\CelesteRecHelper.Core.csproj", "{A83272B3-8263-4B0F-A0F0-4984B5BB9BD4}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CelesteRecHelper.Worker", "src\CelesteRecHelper.Worker\CelesteRecHelper.Worker.csproj", "{0DCFD6FF-CCE0-40B2-92A0-0BD5AC53E6A6}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{881734BB-0EAB-4D26-8D18-8172E879D6C2}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CelesteRecHelper.Core.Tests", "tests\CelesteRecHelper.Core.Tests\CelesteRecHelper.Core.Tests.csproj", "{CE7464B1-7AA9-49AD-8BF1-36C666C1A935}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{E5A19987-49AC-48D5-B5A8-EFB9EAA6D232}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{E5A19987-49AC-48D5-B5A8-EFB9EAA6D232}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{E5A19987-49AC-48D5-B5A8-EFB9EAA6D232}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{E5A19987-49AC-48D5-B5A8-EFB9EAA6D232}.Release|Any CPU.Build.0 = Release|Any CPU
+		{A83272B3-8263-4B0F-A0F0-4984B5BB9BD4}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A83272B3-8263-4B0F-A0F0-4984B5BB9BD4}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A83272B3-8263-4B0F-A0F0-4984B5BB9BD4}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A83272B3-8263-4B0F-A0F0-4984B5BB9BD4}.Release|Any CPU.Build.0 = Release|Any CPU
+		{0DCFD6FF-CCE0-40B2-92A0-0BD5AC53E6A6}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{0DCFD6FF-CCE0-40B2-92A0-0BD5AC53E6A6}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{0DCFD6FF-CCE0-40B2-92A0-0BD5AC53E6A6}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{0DCFD6FF-CCE0-40B2-92A0-0BD5AC53E6A6}.Release|Any CPU.Build.0 = Release|Any CPU
+		{CE7464B1-7AA9-49AD-8BF1-36C666C1A935}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{CE7464B1-7AA9-49AD-8BF1-36C666C1A935}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{CE7464B1-7AA9-49AD-8BF1-36C666C1A935}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{CE7464B1-7AA9-49AD-8BF1-36C666C1A935}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{E5A19987-49AC-48D5-B5A8-EFB9EAA6D232} = {20FB8563-BCA0-4696-B712-5A05C577B923}
+		{A83272B3-8263-4B0F-A0F0-4984B5BB9BD4} = {20FB8563-BCA0-4696-B712-5A05C577B923}
+		{0DCFD6FF-CCE0-40B2-92A0-0BD5AC53E6A6} = {20FB8563-BCA0-4696-B712-5A05C577B923}
+		{CE7464B1-7AA9-49AD-8BF1-36C666C1A935} = {881734BB-0EAB-4D26-8D18-8172E879D6C2}
+	EndGlobalSection
+EndGlobal

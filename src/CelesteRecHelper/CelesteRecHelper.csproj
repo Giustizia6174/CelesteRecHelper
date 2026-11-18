@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>Celeste.Mod.CelesteRecHelper</RootNamespace>
+    <CelesteDirectory Condition="'$(CelesteDirectory)' == ''">$(CELESTE_DIR)</CelesteDirectory>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../CelesteRecHelper.Core/CelesteRecHelper.Core.csproj" />
+    <Reference Include="Celeste"><HintPath>$(CelesteDirectory)/Celeste.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="MMHOOK_Celeste"><HintPath>$(CelesteDirectory)/MMHOOK_Celeste.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="FNA"><HintPath>$(CelesteDirectory)/FNA.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+  <Target Name="CheckCelesteReferences" BeforeTargets="ResolveReferences">
+    <Error Condition="!Exists('$(CelesteDirectory)/Celeste.dll') Or !Exists('$(CelesteDirectory)/MMHOOK_Celeste.dll') Or !Exists('$(CelesteDirectory)/FNA.dll')"
+           Text="Set CELESTE_DIR or pass -p:CelesteDirectory=... pointing to an Everest installation, or use build.ps1." />
+  </Target>
+</Project>

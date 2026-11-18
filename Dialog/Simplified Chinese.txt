@@ -1,0 +1,9 @@
+modoptions_celesterechelper_title= Celeste 录制助手
+modoptions_celesterechelper_enabled= 启用录制助手
+modoptions_celesterechelper_endsegment= 确认片段结束点
+modoptions_celesterechelper_undo= 撤销最近结束点
+modoptions_celesterechelper_obshost= OBS 主机地址
+modoptions_celesterechelper_obsport= OBS WebSocket 端口
+modoptions_celesterechelper_obspassword= OBS WebSocket 密码
+modoptions_celesterechelper_outputdirectory= 视频输出目录
+modoptions_celesterechelper_outputdirectory_help= 留空时使用 OBS 的录像目录。

@@ -1,0 +1,6 @@
+- Name: CelesteRecHelper
+  Version: 0.1.0
+  DLL: bin/CelesteRecHelper.dll
+  Dependencies:
+    - Name: EverestCore
+      Version: 1.6662.0

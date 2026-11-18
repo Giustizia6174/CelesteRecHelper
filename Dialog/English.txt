@@ -1,0 +1,9 @@
+modoptions_celesterechelper_title= Celeste Rec Helper
+modoptions_celesterechelper_enabled= Enable recording helper
+modoptions_celesterechelper_endsegment= Confirm segment end
+modoptions_celesterechelper_undo= Undo last end point
+modoptions_celesterechelper_obshost= OBS host
+modoptions_celesterechelper_obsport= OBS WebSocket port
+modoptions_celesterechelper_obspassword= OBS WebSocket password
+modoptions_celesterechelper_outputdirectory= Video output directory
+modoptions_celesterechelper_outputdirectory_help= Leave empty to use the OBS recording directory.

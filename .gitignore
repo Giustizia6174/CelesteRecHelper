@@ -3,6 +3,7 @@ bin/
 obj/
 *.user
 .vs/
+TestResults/
 
 # 打包产物与随包工具
 dist/
@@ -14,3 +15,4 @@ tools/*.dll
 *.mp4
 *.mov
 .rechelper/
+Saves/

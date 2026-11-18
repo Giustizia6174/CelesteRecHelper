@@ -162,13 +162,13 @@ OBS 回放缓存是滚动窗口，满了会无提示地丢掉最旧画面。
 - [ ] 首版支持的 OBS 输出配置（阶段 2 实测后填写）
 
 ### 阶段 1：环境、骨架、Core 数据模型与持久化
-- [ ] 安装 .NET 8 SDK，确认本机 Everest 版本，对齐游戏程序集版本
-- [ ] 用 Everest 模组模板（`dotnet new celestemod`）建立模组项目，引用 `Celeste.dll`、`MMHOOK_Celeste.dll`、`FNA.dll`
-- [ ] 建立 Core、Worker、测试项目，配置一键构建并复制到 `Mods/CelesteRecHelper`
-- [ ] 模组设置类：开关、结束键、撤销键（`ButtonBinding`）、OBS 地址/端口/密码、输出目录（留空表示共用 OBS 目录）
-- [ ] Core 数据模型：路线、当前这条命、逻辑片段、素材引用
-- [ ] 清单读写（原子写入）和启动时恢复
-- [ ] 中英文 Dialog 文件
+- [x] 安装 .NET 8 SDK，确认本机 Everest 版本，对齐游戏程序集版本
+- [x] 用 Everest 模组模板（`dotnet new celestemod`）建立模组项目，引用 `Celeste.dll`、`MMHOOK_Celeste.dll`、`FNA.dll`
+- [x] 建立 Core、Worker、测试项目，配置一键构建并复制到 `Mods/CelesteRecHelper`
+- [x] 模组设置类：开关、结束键、撤销键（`ButtonBinding`）、OBS 地址/端口/密码、输出目录（留空表示共用 OBS 目录）
+- [x] Core 数据模型：路线、当前这条命、逻辑片段、素材引用
+- [x] 清单读写（原子写入）和启动时恢复
+- [x] 中英文 Dialog 文件
 - 完成条件：模组能加载；路线和素材信息能保存、重启后恢复
 
 项目结构：

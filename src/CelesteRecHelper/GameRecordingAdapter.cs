@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using CelesteRecHelper.Core.Models;
 using CelesteRecHelper.Core.Obs;
 using CelesteRecHelper.Core.Persistence;
@@ -14,7 +15,6 @@ internal sealed class GameRecordingAdapter : IAsyncDisposable
     private readonly ManifestStore store;
     private RouteRun? current;
     private RouteRun? displayed;
-    private Session? exitedSession;
     private Task closing = Task.CompletedTask;
     private Scene? hudScene;
     private RecordingHud? hud;
@@ -33,18 +33,26 @@ internal sealed class GameRecordingAdapter : IAsyncDisposable
 
     private void OnEnter(Session session, bool fromSaveData)
     {
-        exitedSession = null;
-        if (CelesteRecHelperModule.Settings.Enabled) Start(session);
+        var identity = IdentityOf(session);
+        Logger.Log(LogLevel.Info, "CelesteRecHelper",
+            $"Level enter: {identity.MapSid} mode {identity.AreaMode}, slot {identity.SaveSlot}, " +
+            $"from save {fromSaveData}, session {SessionTag(session)}, active session {SessionTag(current?.GameSession)}.");
+        if (CelesteRecHelperModule.Settings.Enabled) Start(session, identity);
     }
 
-    private void Start(Session session)
+    private void Start(Session session, RouteIdentity identity)
     {
-        if (disposed || current?.GameSession == session) return;
+        if (disposed) return;
+        if (current is { } active && active.Identity == identity)
+        {
+            active.UseSession(session);
+            return;
+        }
         CloseCurrent(false, Stopwatch.GetTimestamp());
         var settings = CelesteRecHelperModule.Settings;
-        var run = new RouteRun(store, session, SaveData.Instance?.FileSlot ?? -1,
-            session.Area.SID, Dialog.Clean(AreaData.Get(session.Area).Name), (int)session.Area.Mode,
-            settings.ObsHost, settings.ObsPort, settings.ObsPassword, settings.OutputDirectory, closing);
+        var run = new RouteRun(store, session, identity,
+            Dialog.Clean(AreaData.Get(session.Area).Name), settings.ObsHost, settings.ObsPort,
+            settings.ObsPassword, settings.OutputDirectory, closing);
         current = displayed = run;
     }
 
@@ -55,10 +63,14 @@ internal sealed class GameRecordingAdapter : IAsyncDisposable
         var now = Stopwatch.GetTimestamp();
         if (!CelesteRecHelperModule.Settings.Enabled)
             CloseCurrent(false, now);
-        else if (Engine.Scene is Level level && level.Session != exitedSession && !level.Completed)
+        else if (Engine.Scene is Level level && !level.Completed)
         {
-            if (current?.GameSession != level.Session) Start(level.Session);
-            if (current is { } run && run.GameSession == level.Session && run.Ready && !run.Gate.Completing)
+            var identity = IdentityOf(level.Session);
+            if (current is { } active && active.Identity == identity)
+                active.UseSession(level.Session);
+            else
+                Start(level.Session, identity);
+            if (current is { } run && run.Identity == identity && run.Ready && !run.Gate.Completing)
             {
                 var player = level.Tracker.GetEntity<Player>();
                 var stable = player is { Dead: false, Visible: true, InControl: true } && !player.JustRespawned &&
@@ -78,13 +90,13 @@ internal sealed class GameRecordingAdapter : IAsyncDisposable
 
     private void OnDeath(Player player)
     {
-        if (current is { } run && player.Scene is Level level && level.Session == run.GameSession && run.Gate.OnDeath())
+        if (current is { } run && player.Scene is Level level && run.Identity == IdentityOf(level.Session) && run.Gate.OnDeath())
             run.Died(Stopwatch.GetTimestamp());
     }
 
     private void OnComplete(Level level)
     {
-        if (current is not { } run || run.GameSession != level.Session) return;
+        if (current is not { } run || run.Identity != IdentityOf(level.Session)) return;
         var player = level.Tracker.GetEntity<Player>();
         if (run.Gate.TryBeginCompletion(Stopwatch.GetTimestamp(), player is { Dead: false }))
             run.Notice("rechelper_recording_tail");
@@ -92,9 +104,20 @@ internal sealed class GameRecordingAdapter : IAsyncDisposable
 
     private void OnExit(Level level, LevelExit exit, LevelExit.Mode mode, Session session, HiresSnow snow)
     {
-        if (current is not { } run || run.GameSession != session) return;
-        var completionExit = mode is LevelExit.Mode.Completed or LevelExit.Mode.CompletedInterlude;
-        run.Gate.OnExit(completionExit);
+        var identity = IdentityOf(session);
+        var run = current;
+        var sameSession = run is not null && ReferenceEquals(run.GameSession, session);
+        var sameIdentity = run?.Identity == identity;
+        var disposition = RouteExitPolicy.Decide(ToGameplayExitMode(mode));
+        Logger.Log(LogLevel.Info, "CelesteRecHelper",
+            $"Level exit: {mode}, identity {identity.MapSid} mode {identity.AreaMode}, slot {identity.SaveSlot}, " +
+            $"level session {SessionTag(level.Session)}, event session {SessionTag(session)}, " +
+            $"active session {SessionTag(run?.GameSession)}, session match {sameSession}, " +
+            $"route match {sameIdentity}, disposition {disposition}.");
+        if (run is null || (!sameSession && !sameIdentity)) return;
+        run.UseSession(session);
+        if (disposition == RouteExitDisposition.Continue) return;
+        run.Gate.OnExit(disposition == RouteExitDisposition.Complete);
         if (!run.Gate.Completing) CloseCurrent(false, Stopwatch.GetTimestamp());
     }
 
@@ -102,10 +125,27 @@ internal sealed class GameRecordingAdapter : IAsyncDisposable
     {
         if (current is not { } run) return;
         current = null;
-        exitedSession = run.GameSession;
         if (!completed) run.Gate.OnExit(false);
         closing = run.CloseAsync(completed, timestamp);
     }
+
+    private static RouteIdentity IdentityOf(Session session) => new(
+        SaveData.Instance?.FileSlot ?? -1, session.Area.SID, (int)session.Area.Mode);
+
+    private static string SessionTag(Session? session) => session is null
+        ? "none"
+        : RuntimeHelpers.GetHashCode(session).ToString("x8");
+
+    private static GameplayExitMode ToGameplayExitMode(LevelExit.Mode mode) => mode switch
+    {
+        LevelExit.Mode.SaveAndQuit => GameplayExitMode.SaveAndQuit,
+        LevelExit.Mode.GiveUp => GameplayExitMode.GiveUp,
+        LevelExit.Mode.Restart => GameplayExitMode.Restart,
+        LevelExit.Mode.GoldenBerryRestart => GameplayExitMode.GoldenBerryRestart,
+        LevelExit.Mode.Completed => GameplayExitMode.Completed,
+        LevelExit.Mode.CompletedInterlude => GameplayExitMode.CompletedInterlude,
+        _ => throw new ArgumentOutOfRangeException(nameof(mode), mode, "Unknown Celeste level exit mode.")
+    };
 
     private void AttachHud()
     {
@@ -151,17 +191,21 @@ internal sealed class GameRecordingAdapter : IAsyncDisposable
         private string endpoint = "";
         private RecordingFailure? reportedFailure;
         private int reportedSavedSegments;
-        public Session GameSession { get; }
+        public Session GameSession { get; private set; }
+        public RouteIdentity Identity { get; }
         public GameplayEventGate Gate { get; } = new(Stopwatch.Frequency);
         public bool Ready => Volatile.Read(ref scheduler) is not null;
 
-        public RouteRun(ManifestStore store, Session gameSession, int saveSlot, string sid, string name, int areaMode,
+        public RouteRun(ManifestStore store, Session gameSession, RouteIdentity identity, string name,
             string host, int port, string password, string directory, Task previousClose)
         {
             this.store = store;
             GameSession = gameSession;
+            Identity = identity;
             startup = Task.Run(async () =>
             {
+                RouteManifest? createdRoute = null;
+                ObsSession? createdObsSession = null;
                 try
                 {
                     await previousClose.ConfigureAwait(false);
@@ -199,9 +243,11 @@ internal sealed class GameRecordingAdapter : IAsyncDisposable
                     };
                     var route = new RouteManifest
                     {
-                        RouteId = routeId, SaveSlot = saveSlot, MapSid = sid, MapName = name,
-                        AreaMode = areaMode, ObsSessions = [session]
+                        RouteId = routeId, SaveSlot = identity.SaveSlot, MapSid = identity.MapSid, MapName = name,
+                        AreaMode = identity.AreaMode, ObsSessions = [session]
                     };
+                    createdRoute = route;
+                    createdObsSession = session;
                     try { store.Save(route); }
                     catch (Exception e)
                     {
@@ -211,7 +257,8 @@ internal sealed class GameRecordingAdapter : IAsyncDisposable
                     var started = new ReplaySaveScheduler(new SegmentStateMachine(route, session.Id), capture, store.Save, this.endpoint);
                     Volatile.Write(ref scheduler, started);
                     Notice("rechelper_recording_started");
-                    Logger.Log(LogLevel.Info, "CelesteRecHelper", $"Route {routeId:N} started: {sid}, slot {saveSlot}.");
+                    Logger.Log(LogLevel.Info, "CelesteRecHelper",
+                        $"Route {routeId:N} started: {identity.MapSid}, mode {identity.AreaMode}, slot {identity.SaveSlot}.");
                 }
                 catch (OperationCanceledException) when (startupCancellation.IsCancellationRequested) { }
                 catch (Exception e) { SetFailure(RecordingFailureClassifier.Classify(e, RecordingFailureStage.Start)); }
@@ -219,15 +266,44 @@ internal sealed class GameRecordingAdapter : IAsyncDisposable
                 {
                     if (scheduler is null && capture is not null)
                     {
+                        var captureStopped = false;
                         try
                         {
                             using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(15));
                             await capture.StopAsync(this.endpoint, cleanup.Token).ConfigureAwait(false);
+                            captureStopped = true;
                         }
                         catch (Exception e) { SetFailure(RecordingFailureClassifier.Classify(e, RecordingFailureStage.Stop)); }
+
+                        if (captureStopped && createdRoute is not null && createdObsSession is not null)
+                        {
+                            createdObsSession.ReplayBufferWasActive = false;
+                            createdObsSession.RecordingWasActive = false;
+                            createdObsSession.EndedAtUtc = DateTimeOffset.UtcNow;
+                            createdRoute.Status = RouteStatus.Ended;
+                            try
+                            {
+                                store.Save(createdRoute);
+                                if (store.DeleteIfEmptyClosedRoute(routeId))
+                                    Logger.Log(LogLevel.Info, "CelesteRecHelper", $"Removed empty route {routeId:N} after startup cleanup.");
+                            }
+                            catch (Exception e)
+                            {
+                                SetFailure(RecordingFailureClassifier.Classify(e, RecordingFailureStage.Manifest));
+                            }
+                        }
                     }
                 }
             });
+        }
+
+        public void UseSession(Session session)
+        {
+            if (ReferenceEquals(GameSession, session)) return;
+            Logger.Log(LogLevel.Info, "CelesteRecHelper",
+                $"Route {routeId:N}: replacing Session object while keeping logical identity {Identity.MapSid}, " +
+                $"mode {Identity.AreaMode}, slot {Identity.SaveSlot}.");
+            GameSession = session;
         }
 
         private void OnConnectionState(ObsConnectionState state)
@@ -333,6 +409,7 @@ internal sealed class GameRecordingAdapter : IAsyncDisposable
                     "rechelper_error_start_notready", "The chapter completed before the replay capture became ready."));
             startupCancellation.Cancel();
             await startup.ConfigureAwait(false);
+            var schedulerStoppedCleanly = false;
             if (scheduler is { } active)
             {
                 try
@@ -341,7 +418,11 @@ internal sealed class GameRecordingAdapter : IAsyncDisposable
                     else await active.OnExitAsync(timestamp).ConfigureAwait(false);
                 }
                 catch (Exception e) { SetFailure(active.Snapshot.Failure ?? RecordingFailureClassifier.Classify(e, RecordingFailureStage.Save)); }
-                try { await active.DisposeAsync().ConfigureAwait(false); }
+                try
+                {
+                    await active.DisposeAsync().ConfigureAwait(false);
+                    schedulerStoppedCleanly = true;
+                }
                 catch (Exception e) { SetFailure(active.Snapshot.Failure ?? RecordingFailureClassifier.Classify(e, RecordingFailureStage.Stop)); }
             }
             if (client is not null)
@@ -349,6 +430,18 @@ internal sealed class GameRecordingAdapter : IAsyncDisposable
                 client.StateChanged -= OnConnectionState;
                 client.EventReceived -= OnObsEvent;
                 await client.DisposeAsync().ConfigureAwait(false);
+            }
+            if (schedulerStoppedCleanly)
+            {
+                try
+                {
+                    if (store.DeleteIfEmptyClosedRoute(routeId))
+                        Logger.Log(LogLevel.Info, "CelesteRecHelper", $"Removed empty route {routeId:N} after OBS stopped.");
+                }
+                catch (Exception e)
+                {
+                    Logger.Log(LogLevel.Warn, "CelesteRecHelper", $"Could not clean empty route {routeId:N}: {e.Message}");
+                }
             }
             startupCancellation.Dispose();
         }

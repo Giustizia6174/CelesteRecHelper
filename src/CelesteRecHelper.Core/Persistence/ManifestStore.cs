@@ -35,6 +35,23 @@ public sealed class ManifestStore
         AtomicJsonFile.Write(GetManifestPath(route.RouteId), route);
     }
 
+    /// <summary>Delete a closed route only when its OBS sessions stopped and it has no recoverable work or media.</summary>
+    public bool DeleteIfEmptyClosedRoute(Guid routeId)
+    {
+        var manifestPath = GetManifestPath(routeId);
+        if (!File.Exists(manifestPath)) return false;
+
+        var route = Load(routeId);
+        if (route.Status is not (RouteStatus.Ended or RouteStatus.Completed) || route.CurrentLife is not null ||
+            route.Segments.Count != 0 || route.SaveRequests.Count != 0 || route.Media.Count != 0 ||
+            route.ObsSessions.Count == 0 || route.ObsSessions.Any(session =>
+                session.ReplayBufferWasActive || session.RecordingWasActive || session.EndedAtUtc is null))
+            return false;
+
+        Directory.Delete(Path.GetDirectoryName(manifestPath)!, recursive: true);
+        return true;
+    }
+
     public IEnumerable<Guid> EnumerateRouteIds()
     {
         if (!Directory.Exists(RoutesDirectory))

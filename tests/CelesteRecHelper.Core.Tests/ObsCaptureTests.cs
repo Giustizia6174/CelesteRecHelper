@@ -139,13 +139,135 @@ public sealed class ObsCaptureTests : IDisposable
         Assert.DoesNotContain("StartReplayBuffer", backend.Commands);
     }
 
+    [Fact]
+    public async Task RecordingWaitsForRunningAndStoppedEventsAndReturnsTheClosedFile()
+    {
+        var backend = new FakeOutputs(workspace);
+        await using var server = await ObsTestServer.StartAsync(backend.RunAsync);
+        await using var client = new ObsWebSocketClient(server.Endpoint);
+        await client.ConnectAsync();
+        var api = new ObsApi(client);
+        var recording = new ObsRecordingSession(api, workspace.VideoDirectory);
+        var started = await recording.StartAsync();
+        Assert.True(started.StartedAtTimestamp >= started.RequestedAtTimestamp);
+        Assert.True(recording.OwnsRecording);
+        var saved = await recording.StopAsync();
+        Assert.NotNull(saved);
+        Assert.Equal(started, saved.Start);
+        Assert.True(saved.StoppedAtTimestamp >= saved.StopRequestedAtTimestamp);
+        Assert.True(File.Exists(saved.FilePath));
+        Assert.False(recording.OwnsRecording);
+        Assert.Null(await recording.StopAsync());
+        Assert.Equal(1, backend.Commands.Count(c => c == "StopRecord"));
+    }
+
+    [Fact]
+    public async Task ExistingRecordingIsNeitherStartedNorStopped()
+    {
+        var backend = new FakeOutputs(workspace) { RecordingActive = true };
+        await using var server = await ObsTestServer.StartAsync(backend.RunAsync);
+        await using var client = new ObsWebSocketClient(server.Endpoint);
+        await client.ConnectAsync();
+        var recording = new ObsRecordingSession(new ObsApi(client), workspace.VideoDirectory);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => recording.StartAsync());
+        Assert.Null(await recording.StopAsync());
+        Assert.DoesNotContain("StartRecord", backend.Commands);
+        Assert.DoesNotContain("StopRecord", backend.Commands);
+    }
+
+    [Fact]
+    public async Task SuccessfulStartResponseWithoutRunningEventTimesOutAndCleanupRetainsTheRecording()
+    {
+        var backend = new FakeOutputs(workspace) { EmitRecordingStartEvent = false };
+        await using var server = await ObsTestServer.StartAsync(backend.RunAsync);
+        await using var client = new ObsWebSocketClient(server.Endpoint);
+        await client.ConnectAsync();
+        var recording = new ObsRecordingSession(new ObsApi(client), workspace.VideoDirectory);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => recording.StartAsync(TimeSpan.FromMilliseconds(100)));
+        Assert.True(recording.OwnsRecording);
+        await Assert.ThrowsAsync<InvalidDataException>(() => recording.StopAsync());
+        Assert.False(recording.OwnsRecording);
+        Assert.True(File.Exists(Path.Combine(workspace.VideoDirectory, "record.mkv")));
+        Assert.Equal(1, backend.Commands.Count(c => c == "StopRecord"));
+    }
+
+    [Fact]
+    public async Task ReconnectedTransportDoesNotReuseOldRecordingOrReplayOwnership()
+    {
+        var backend = new FakeOutputs(workspace);
+        await using var server = await ObsTestServer.StartAsync(backend.RunAsync);
+        await using var client = new ObsWebSocketClient(server.Endpoint, reconnectDelay: TimeSpan.FromMilliseconds(10));
+        await client.ConnectAsync();
+        var api = new ObsApi(client);
+        var buffer = new ObsCaptureSession(api, workspace.Store);
+        await buffer.StartAsync(server.Endpoint.AbsoluteUri);
+        var recording = new ObsRecordingSession(api, workspace.VideoDirectory);
+        await recording.StartAsync();
+        var originalConnection = client.ConnectionId;
+        var connected = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.StateChanged += state => { if (state == ObsConnectionState.Connected && client.ConnectionId != originalConnection) connected.TrySetResult(); };
+        await Assert.ThrowsAsync<IOException>(() => client.RequestAsync("Disconnect"));
+        await connected.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await Assert.ThrowsAsync<IOException>(() => recording.StopAsync());
+        await Assert.ThrowsAsync<IOException>(() => buffer.SaveAsync());
+        await Assert.ThrowsAsync<IOException>(() => buffer.StopAsync(server.Endpoint.AbsoluteUri));
+        Assert.DoesNotContain("StopRecord", backend.Commands);
+        Assert.DoesNotContain("StopReplayBuffer", backend.Commands);
+        Assert.DoesNotContain("SaveReplayBuffer", backend.Commands);
+    }
+
+    [Fact]
+    public async Task CancellingDuringHandoffClosesBothOwnedOutputsAndKeepsFailureEvidence()
+    {
+        var backend = new FakeOutputs(workspace);
+        await using var server = await ObsTestServer.StartAsync(backend.RunAsync);
+        await using var client = new ObsWebSocketClient(server.Endpoint);
+        await client.ConnectAsync();
+        using var cancellation = new CancellationTokenSource();
+        client.EventReceived += message =>
+        {
+            if (message.Type == "RecordStateChanged" && message.Data.GetProperty("outputState").GetString() == "OBS_WEBSOCKET_OUTPUT_STARTED")
+                cancellation.CancelAfter(50);
+        };
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            ObsHandoffTest.RunAsync(new ObsApi(client), workspace.Store, server.Endpoint.AbsoluteUri, ct: cancellation.Token));
+        Assert.False(backend.RecordingActive);
+        Assert.False(backend.ReplayActive);
+        Assert.Equal(1, backend.Commands.Count(c => c == "StopRecord"));
+        Assert.Equal(1, backend.Commands.Count(c => c == "StopReplayBuffer"));
+        Assert.DoesNotContain("SaveReplayBuffer", backend.Commands);
+        Assert.True(File.Exists(Path.Combine(workspace.VideoDirectory, "record.mkv")));
+        Assert.Single(Directory.EnumerateFiles(workspace.Store.RootDirectory, "error.json", SearchOption.AllDirectories));
+    }
+
+    [Fact]
+    public async Task FailedHandoffStartupRestoresCustomDirectoriesWithoutStoppingForeignOutputs()
+    {
+        var backend = new FakeOutputs(workspace) { StartReplayError = 500 };
+        await using var server = await ObsTestServer.StartAsync(backend.RunAsync);
+        await using var client = new ObsWebSocketClient(server.Endpoint);
+        await client.ConnectAsync();
+        var custom = Path.Combine(workspace.Root, "custom");
+        await Assert.ThrowsAsync<ObsRequestException>(() =>
+            ObsHandoffTest.RunAsync(new ObsApi(client), workspace.Store, server.Endpoint.AbsoluteUri, custom));
+        Assert.Equal(workspace.VideoDirectory, backend.SimpleDirectory);
+        Assert.Equal(Path.Combine(workspace.Root, "advanced"), backend.AdvancedDirectory);
+        Assert.Null(workspace.Store.LoadObsRecovery());
+        Assert.DoesNotContain("StopReplayBuffer", backend.Commands);
+        Assert.DoesNotContain("StopRecord", backend.Commands);
+        Assert.Single(Directory.EnumerateFiles(workspace.Store.RootDirectory, "error.json", SearchOption.AllDirectories));
+        Assert.Empty(Directory.EnumerateFiles(workspace.Store.RootDirectory, "cleanup-error.json", SearchOption.AllDirectories));
+    }
+
     private sealed class FakeOutputs(TestWorkspace workspace)
     {
         public int? ReplayStatusError { get; init; }
+        public int? StartReplayError { get; init; }
         public bool ReplayEnabled { get; init; } = true;
         public bool RecordingActive { get; set; }
         public bool ReplayActive { get; set; }
         public bool EmitSaveEvent { get; set; } = true;
+        public bool EmitRecordingStartEvent { get; init; } = true;
         public bool SendWrongPathFirst { get; init; }
         public string SimpleDirectory { get; private set; } = workspace.VideoDirectory;
         public string AdvancedDirectory { get; private set; } = Path.Combine(workspace.Root, "advanced");
@@ -159,9 +281,15 @@ public sealed class ObsCaptureTests : IDisposable
                 var request = await ObsTestServer.Receive(socket, ct);
                 var type = request.GetProperty("requestType").GetString()!;
                 Commands.Enqueue(type);
+                if (type == "Disconnect") { socket.Abort(); return; }
                 if (type == "GetReplayBufferStatus" && ReplayStatusError is { } errorCode)
                 {
                     await ObsTestServer.Reply(socket, request, null, ct, success: false, errorCode: errorCode);
+                    continue;
+                }
+                if (type == "StartReplayBuffer" && StartReplayError is { } startError)
+                {
+                    await ObsTestServer.Reply(socket, request, null, ct, success: false, errorCode: startError);
                     continue;
                 }
                 object result = new { };
@@ -171,6 +299,24 @@ public sealed class ObsCaptureTests : IDisposable
                     case "GetProfileList": result = new { currentProfileName = "Test" }; break;
                     case "GetRecordStatus": result = new { outputActive = RecordingActive }; break;
                     case "GetReplayBufferStatus": result = new { outputActive = ReplayActive }; break;
+                    case "StartRecord":
+                        RecordingActive = true;
+                        // Reply first: the caller must still wait for the later running event.
+                        await ObsTestServer.Reply(socket, request, new { }, ct);
+                        if (EmitRecordingStartEvent)
+                        {
+                            await Task.Delay(25, ct);
+                            await ObsTestServer.Event(socket, "RecordStateChanged", new { outputActive = true, outputState = "OBS_WEBSOCKET_OUTPUT_STARTED", outputPath = (string?)null }, ct);
+                        }
+                        continue;
+                    case "StopRecord":
+                        RecordingActive = false;
+                        var recordPath = Path.Combine(SimpleDirectory, "record.mkv");
+                        await File.WriteAllBytesAsync(recordPath, [4, 5, 6], ct);
+                        await ObsTestServer.Reply(socket, request, new { outputPath = recordPath }, ct);
+                        await Task.Delay(25, ct);
+                        await ObsTestServer.Event(socket, "RecordStateChanged", new { outputActive = false, outputState = "OBS_WEBSOCKET_OUTPUT_STOPPED", outputPath = recordPath }, ct);
+                        continue;
                     case "GetRecordDirectory": result = new { recordDirectory = SimpleDirectory }; break;
                     case "GetOutputList": result = new { outputs = Array.Empty<object>() }; break;
                     case "GetProfileParameter":

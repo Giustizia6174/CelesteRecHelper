@@ -1,6 +1,6 @@
 # CelesteRecHelper
 
-按 [PLAN.md](PLAN.md) 开发的 Everest 录制助手。当前完成阶段 1–2：模组骨架、设置、Core 模型、原子持久化/恢复、OBS 连接与测试回放，以及 Worker 媒体探测。游戏事件驱动的录制、长片段交接和最终剪辑按后续阶段接入。
+按 [PLAN.md](PLAN.md) 开发的 Everest 录制助手。当前完成阶段 1–3：模组骨架、设置、Core 模型、原子持久化/恢复、OBS 连接与测试回放、Worker 媒体探测，以及手动长片段交接与画面重叠验证。游戏事件驱动的录制、自动交接和最终剪辑按后续阶段接入。
 
 ## 构建与部署
 
@@ -26,7 +26,7 @@ dotnet test tests/CelesteRecHelper.Core.Tests/CelesteRecHelper.Core.Tests.csproj
 
 ## 模组设置
 
-游戏的 Mod 选项中提供启用开关、结束键（默认 F8）、撤销键（默认 F9）、OBS 主机/端口/密码和视频输出目录。开关默认关闭。当前按键和开关仍是设置入口；游戏事件驱动的录制在阶段 4 接入。阶段 2 可通过“保存测试回放”独立验证采集链路。
+游戏的 Mod 选项中提供启用开关、结束键（默认 F8）、撤销键（默认 F9）、OBS 主机/端口/密码和视频输出目录。开关默认关闭。当前按键和开关仍是设置入口；游戏事件驱动的录制在阶段 4 接入。可通过“保存测试回放”独立验证采集链路，通过“测试长片段交接”验证缓存与普通录制的覆盖关系。
 
 OBS 默认主机 `127.0.0.1`、端口 `4455`。输出目录留空表示使用 OBS 录像目录。密码在选项列表里隐藏，修改时使用 Everest 的标准文本编辑器。设置由 Everest 持久化；密码不写入路线清单和日志。
 
@@ -63,7 +63,7 @@ Worker 骨架支持只读列出路线：
 
 模组菜单提供“检查 OBS 连接”和“保存测试回放（约 3 秒）”。连接检查显示连接、缓存可用性、估算缓存时长和验证状态，并提示缓存过短或输出已被占用。测试回放会独占启动缓存、等待约 3 秒、保存并等待完成事件、停止缓存，随后启动隐藏的 Worker 探测视频。用户已有普通录制或缓存时拒绝启动。测试素材保留，诊断结果写入固定数据根目录的 `diagnostics/last-replay.json`。
 
-缓存估算优先读取实际输出的 `max_time_sec` / `max_size_mb`，输出尚未配置时回退到当前输出模式的 profile 参数。内存限制为零时只按时长估算；质量编码先按 50 Mbps 保守估计，保存探测后用文件大小/时长得到实际码率，再加 50% 余量修正。未验证配置的交接阈值最多 30 秒。这里的验证状态针对缓存估算，已实测的编码组合见 PLAN 第四节。
+缓存估算优先读取实际输出的 `max_time_sec` / `max_size_mb`，输出尚未配置时回退到当前输出模式的 profile 参数。内存限制为零时只按时长估算；质量编码先按 50 Mbps 保守估计，保存探测后用文件大小/时长得到实际码率，再加 50% 余量修正。阶段 3 将安全余量固定为 `max(30% × C, 15 秒)`，交接阈值为 `max(0, C − 安全余量)`；未验证配置另将阈值限制在最多 30 秒。这里的验证状态针对缓存估算，已实测的编码组合见 PLAN 第四节。
 
 保存以 `ReplayBufferSaved` 事件为准，检查新文件是否位于预期目录并已写入数据。超时/断线后禁止在同一次缓存会话继续保存，以免迟到事件被错配到下一次请求；停止并重新启动后才能继续。用户在请求窗口内手动保存回放仍可能干扰对应关系，应避免同时使用 OBS 保存热键。
 
@@ -82,10 +82,41 @@ Worker 新增以下命令：
 
 `obs-save` 必须显式指定固定数据目录 `--data-dir`，以便游戏能在崩溃后找到 OBS 恢复记录；还支持 `--endpoint`、`--password-env`、`--output-directory` 和 `--ffprobe`；使用自定义目录前会持久化两种输出模式的原目录，停止后恢复。探测视频时逐行读取帧时间戳，避免将长视频的所有帧信息加载到内存。外部进程使用独立参数列表，中文/空格路径受测试覆盖。
 
-ffprobe 查找与本地工具来源见 [tools/README.md](tools/README.md)。构建脚本发现 `tools/ffprobe.exe` 时会随 Worker 放入成品目录；缺少时可用 `CELESTE_REC_FFPROBE` 或 PATH。媒体集成测试需要 ffmpeg/ffprobe；缺少工具时明确标为跳过。
+媒体工具的查找与本地来源见 [tools/README.md](tools/README.md)。构建脚本会将本地 `tools/ffprobe.exe` 和 `tools/ffmpeg.exe` 随 Worker 放入成品目录：ffprobe 用于探测，ffmpeg 用于交接帧匹配。缺少时可分别使用 `CELESTE_REC_FFPROBE`、`CELESTE_REC_FFMPEG` 或 PATH。媒体集成测试需要这两项工具；缺少工具时明确标为跳过。
 
 阶段 2 验证（2026-11-18）：构建 0 警告、0 错误；41 项测试全部通过、无跳过。独立 OBS 32.2.2 / obs-websocket 5.7.4 实测简单输出 1 音轨、高级输出 2 音轨，均完成保存事件 → 新文件 → Worker 探测；同时录制时日志确认共用视频编码器。测试未修改用户现有 OBS profile。
 
 阶段 2 新版已部署至本机游戏，实际启动日志确认主模组/Core 加载和恢复初始化成功，游戏完成启动。
 
 2026-11-19 连接兼容性修正：OBS 在回放缓存未启用或不可用时，`GetReplayBufferStatus` 可能返回 604（InvalidResourceState）。连接检查现将 504/604 显示为回放不可用，保留正常连接状态；其他错误仍向上报告。已补充连接诊断及目录恢复回归测试，44 项测试通过，并通过真实 OBS 的密码鉴权验证。
+
+## 阶段 3：手动长片段交接验证
+
+模组菜单新增“测试长片段交接（约 10 秒）”。测试独占启动回放缓存，预留 3 秒画面后启动普通录制，等待 `RecordStateChanged` 的 `OBS_WEBSOCKET_OUTPUT_STARTED` 事件，再等 2 秒后保存回放，继续录制 1 秒后停止。保存回放期间，回放缓存和普通录制均继续运行。已有普通录制或回放缓存时拒绝启动；结束或取消时尝试停止本次启动的输出。连接重建后不会沿用旧连接的输出所有权，需核对 OBS 状态。
+
+测试随后在隐藏 Worker 中探测两份素材，并比较回放尾部和普通录制头部的连续解码画面。至少匹配 0.5 秒、包含 8 个不同帧且只有一个有效对齐时，才报告“已验证”；静止、循环、没有匹配或时间间隔不一致的画面报告“待确认”。测试期间应让 OBS 捕获到持续变化的画面。两种结果都保留视频和报告，供检查或离线重跑。
+
+每次报告位于固定数据目录的 `diagnostics/handoff/<测试编号>/`：
+
+- `capture-state.json`：采集进度、已获得的路径和时钟记录。
+- `capture.json`：完成的采集记录，包含两份素材路径、原始请求/事件时间和时钟频率。
+- `replay-frames.json`、`recording-frames.json`：比较窗口的帧哈希和 PTS。
+- `verification.json`：媒体探测、重叠证据、两份素材中的接缝 PTS、延迟及安全余量建议。
+- 发生采集或清理错误时另存 `error.json`、`cleanup-error.json`。
+
+Worker 也可以直接运行采集或离线复核：
+
+```powershell
+# 默认连续做 3 轮；密码沿用 CELESTE_REC_OBS_PASSWORD
+# 端口不是 4455 时，另加 --endpoint 'ws://127.0.0.1:实际端口'
+.\dist\Debug\CelesteRecHelper\worker\CelesteRecHelper.Worker.exe obs-handoff --data-dir 'D:\Games\Celeste\Saves\CelesteRecHelper' --repeat 3 --overlap-seconds 2 --output '.\dist\handoff.json'
+
+# 只复核已有素材，不操作 OBS；请将“测试编号”替换为报告目录名
+.\dist\Debug\CelesteRecHelper\worker\CelesteRecHelper.Worker.exe verify-handoff 'D:\Games\Celeste\Saves\CelesteRecHelper\diagnostics\handoff\测试编号\capture.json'
+```
+
+`obs-handoff` 必须显式指定固定的 `--data-dir`，支持 `--repeat 1..10`、`--overlap-seconds 0.1..10`、`--endpoint`、`--password-env`、`--output-directory`、`--ffmpeg`、`--ffprobe` 和 `--output`。`verify-handoff` 支持两项媒体工具路径与 `--output`。退出码 0 表示全部验证通过，3 表示至少一项待确认，1 表示运行失败。视频仍保留在 OBS 录像目录或指定的输出目录。
+
+阶段 3 本机验证（2026-11-19）：沿用用户现有 OBS 32.2.2 / obs-websocket 5.7.4、AMD H.264、1920×1080 / 60 FPS、MKV、单音轨、缓存 300 秒 / 512 MB，完成四次实际交接。重叠等待均为 2 秒，连续画面重叠为 4.367、3.800、3.900、3.950 秒，均找到唯一有效对齐。启动延迟 16.5–28.4 毫秒，保存完成延迟 226.9–256.6 毫秒。保留 2 秒等待，安全余量采用 `max(30% × C, 15 秒)`；详细记录见 PLAN 的阶段 3。
+
+构建 0 警告、0 错误；61 项测试通过、无跳过，包括真实 ffmpeg 生成素材的已知重叠/缺口验证、静止和循环画面判定、输出已被占用、缺少运行事件、重连后的所有权检查、取消时的清理，以及启动失败后的自定义录像目录恢复。上述实测验证手动短时交接的画面覆盖；自动阈值触发、最终裁剪、音频接缝和长时间误差仍按阶段 4–6 完成。

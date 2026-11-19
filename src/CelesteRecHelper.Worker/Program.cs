@@ -8,12 +8,15 @@ using CelesteRecHelper.Worker.Media;
 var json = new JsonSerializerOptions { WriteIndented = true, Converters = { new JsonStringEnumConverter() } };
 if (args.Length == 0 || args is ["--help"] or ["-h"])
 {
-    Console.WriteLine("CelesteRecHelper.Worker — stage 2");
+    Console.WriteLine("CelesteRecHelper.Worker — stage 3");
     Console.WriteLine("routes <data-directory>");
     Console.WriteLine("probe <video> [--ffprobe <executable>] [--output <json>]");
     Console.WriteLine("obs-check [--endpoint <ws://host:port>] [--password-env <variable>]");
     Console.WriteLine("obs-save --data-dir <Saves/CelesteRecHelper directory> [--endpoint <uri>] [--password-env <variable>] [--wait-seconds <seconds>]");
     Console.WriteLine("         [--output-directory <videos>] [--ffprobe <exe>] [--output <json>]");
+    Console.WriteLine("obs-handoff --data-dir <directory> [--endpoint <uri>] [--password-env <variable>]");
+    Console.WriteLine("            [--repeat <1..10>] [--overlap-seconds <0.1..10>] [--output-directory <videos>] [--ffmpeg <exe>] [--ffprobe <exe>] [--output <json>]");
+    Console.WriteLine("verify-handoff <capture.json> [--ffmpeg <exe>] [--ffprobe <exe>] [--output <json>]");
     Console.WriteLine("OBS password defaults to CELESTE_REC_OBS_PASSWORD. obs-check is read-only; obs-save owns and stops its replay buffer.");
     return 0;
 }
@@ -34,12 +37,15 @@ try
         "routes" => Array.Empty<string>(),
         "probe" => ["--ffprobe", "--output"],
         "obs-check" => ["--endpoint", "--password-env"],
+        "verify-handoff" => ["--ffmpeg", "--ffprobe", "--output"],
+        "obs-handoff" => ["--endpoint", "--password-env", "--data-dir", "--output-directory", "--overlap-seconds", "--repeat", "--ffmpeg", "--ffprobe", "--output"],
         "obs-save" => ["--endpoint", "--password-env", "--wait-seconds", "--data-dir", "--output-directory", "--ffprobe", "--output"],
         _ => throw new ArgumentException("Unknown command. Use --help for usage.")
     };
     if (options.Keys.Any(key => !allowed.Contains(key))) throw new ArgumentException("Unknown option. Use --help for usage.");
     string Option(string key, string fallback) => options.GetValueOrDefault(key, fallback);
     object result;
+    var resultCode = 0;
     if (args[0] == "routes" && positional.Count == 1)
     {
         var store = new ManifestStore(positional[0]);
@@ -56,16 +62,41 @@ try
             throw new ArgumentException("Output JSON must not overwrite the input video.");
         result = await new MediaProbe(Option("--ffprobe", MediaProbe.FindExecutable())).ProbeAsync(positional[0], shutdown.Token);
     }
-    else if (args[0] is "obs-check" or "obs-save" && positional.Count == 0)
+    else if (args[0] == "verify-handoff" && positional.Count == 1)
     {
-        if (args[0] == "obs-save" && !options.ContainsKey("--data-dir"))
-            throw new ArgumentException("obs-save requires --data-dir pointing to the fixed Saves/CelesteRecHelper directory.");
+        var capture = AtomicJsonFile.Read<CelesteRecHelper.Core.Models.HandoffCapture>(positional[0]);
+        var report = await new HandoffVerifier(Option("--ffmpeg", HandoffVerifier.FindFfmpeg()),
+            Option("--ffprobe", MediaProbe.FindExecutable())).VerifyAsync(capture, Path.GetDirectoryName(Path.GetFullPath(positional[0]))!, shutdown.Token);
+        result = report;
+        if (report.Evidence.Status != CelesteRecHelper.Core.Models.OverlapStatus.Verified) resultCode = 3;
+    }
+    else if (args[0] is "obs-check" or "obs-save" or "obs-handoff" && positional.Count == 0)
+    {
+        if (args[0] != "obs-check" && !options.ContainsKey("--data-dir"))
+            throw new ArgumentException(args[0] + " requires --data-dir pointing to the fixed Saves/CelesteRecHelper directory.");
         var endpoint = Option("--endpoint", "ws://127.0.0.1:4455");
         var password = Environment.GetEnvironmentVariable(Option("--password-env", "CELESTE_REC_OBS_PASSWORD")) ?? "";
         await using var client = new ObsWebSocketClient(new Uri(endpoint), password);
         await client.ConnectAsync(shutdown.Token);
         var api = new ObsApi(client);
         if (args[0] == "obs-check") result = await new ObsInspector(api).InspectAsync(ct: shutdown.Token);
+        else if (args[0] == "obs-handoff")
+        {
+            var repeat = int.Parse(Option("--repeat", "3"), CultureInfo.InvariantCulture);
+            var overlap = double.Parse(Option("--overlap-seconds", "2"), CultureInfo.InvariantCulture);
+            if (repeat is < 1 or > 10) throw new ArgumentException("Repeat count must be between 1 and 10.");
+            var store = new ManifestStore(options["--data-dir"]);
+            var verifier = new HandoffVerifier(Option("--ffmpeg", HandoffVerifier.FindFfmpeg()), Option("--ffprobe", MediaProbe.FindExecutable()));
+            var reports = new List<CelesteRecHelper.Core.Models.HandoffVerification>();
+            for (var attempt = 0; attempt < repeat; attempt++)
+            {
+                var capture = await ObsHandoffTest.RunAsync(api, store, endpoint, options.GetValueOrDefault("--output-directory"), overlap, shutdown.Token);
+                var folder = Path.Combine(store.RootDirectory, "diagnostics", "handoff", capture.TestId.ToString("N"));
+                reports.Add(await verifier.VerifyAsync(capture, folder, shutdown.Token));
+            }
+            result = reports;
+            if (reports.Any(r => r.Evidence.Status != CelesteRecHelper.Core.Models.OverlapStatus.Verified)) resultCode = 3;
+        }
         else
         {
             var wait = double.Parse(Option("--wait-seconds", "3"), CultureInfo.InvariantCulture);
@@ -92,7 +123,7 @@ try
     else throw new ArgumentException("Invalid arguments. Use --help for usage.");
     if (options.TryGetValue("--output", out var output)) AtomicJsonFile.Write(output, result);
     Console.WriteLine(JsonSerializer.Serialize(result, json));
-    return 0;
+    return resultCode;
 }
 catch (Exception e) when (e is IOException or InvalidDataException or UnauthorizedAccessException or JsonException
     or ArgumentException or InvalidOperationException or NotSupportedException or TimeoutException

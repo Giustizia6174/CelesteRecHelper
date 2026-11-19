@@ -12,6 +12,7 @@ public sealed record ObsDiagnostics(string ObsVersion, string WebSocketVersion, 
 
 public static class ReplayCapacityEstimator
 {
+    public const double MinimumSafetyMarginSeconds = 15;
     public static ReplayCapacity Estimate(ReplayConfiguration configuration, double? measuredBitsPerSecond = null)
     {
         if (configuration.DurationSeconds <= 0 || !double.IsFinite(configuration.DurationSeconds) ||
@@ -27,7 +28,7 @@ public static class ReplayCapacityEstimator
         }
         var verified = configuration.OutputSupported && configuration.ActualLimitsRead &&
             (configuration.MemoryLimitMb == 0 || measured);
-        var threshold = seconds * 0.7;
+        var threshold = Math.Max(0, seconds - Math.Max(seconds * 0.3, MinimumSafetyMarginSeconds));
         if (!verified) threshold = Math.Min(threshold, 30);
         return new ReplayCapacity(seconds, threshold, verified,
             !configuration.OutputSupported ? "Unsupported recording output; estimate is unverified." :

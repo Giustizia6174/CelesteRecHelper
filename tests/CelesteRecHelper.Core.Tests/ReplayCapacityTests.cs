@@ -26,6 +26,15 @@ public sealed class ReplayCapacityTests
         Assert.True(measured.HandoffSeconds < measured.Seconds);
     }
 
+    [Theory]
+    [InlineData(20, 5)]
+    [InlineData(10, 0)]
+    public void ShortBuffersReserveAtLeastTheMeasuredSafetyFloor(double capacity, double threshold)
+    {
+        var result = ReplayCapacityEstimator.Estimate(new("Advanced", true, capacity, 0, "obs_x264", true, true, true));
+        Assert.Equal(threshold, result.HandoffSeconds);
+    }
+
     [Fact]
     public void UnknownOutputStaysUnverifiedAndHandsOffEarly()
     {

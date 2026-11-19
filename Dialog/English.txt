@@ -20,3 +20,6 @@ rechelper_obs_failed= OBS operation failed; see game log for details
 rechelper_obs_inuse= OBS output in use; stop it before starting the helper.
 rechelper_obs_shortbuffer= Short replay buffer: increase its duration in OBS (e.g. 5 minutes).
 rechelper_obs_unverified_help= Unverified buffer estimate; using an early handoff threshold.
+rechelper_obs_handoff= Test long segment handoff (about 10 seconds)
+rechelper_obs_handoff_verified= Handoff frame overlap verified:
+rechelper_obs_handoff_inconclusive= Handoff needs review; keep changing gameplay visible and retry.

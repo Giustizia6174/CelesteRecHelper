@@ -20,3 +20,6 @@ rechelper_obs_failed= OBS 操作失败，详情见游戏日志
 rechelper_obs_inuse= OBS 输出正在使用，请先停止后再启动录制助手。
 rechelper_obs_shortbuffer= 回放缓存过短，请在 OBS 中调大时长（例如 5 分钟）。
 rechelper_obs_unverified_help= 缓存估算尚未验证，将提前进行长片段交接。
+rechelper_obs_handoff= 测试长片段交接（约 10 秒）
+rechelper_obs_handoff_verified= 已验证交接画面重叠：
+rechelper_obs_handoff_inconclusive= 交接结果待确认，请保持游戏画面变化后重试。

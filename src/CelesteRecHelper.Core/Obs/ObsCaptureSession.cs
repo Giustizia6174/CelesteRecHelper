@@ -12,6 +12,7 @@ public sealed class ObsCaptureSession(ObsApi api, ManifestStore store)
 {
     private readonly SemaphoreSlim operation = new(1);
     private bool owned;
+    private Guid connectionId;
     private bool saveUncertain;
     private string? outputDirectory;
     public bool OwnsReplayBuffer => owned;
@@ -75,8 +76,12 @@ public sealed class ObsCaptureSession(ObsApi api, ManifestStore store)
                 outputDirectory = path;
             }
             else outputDirectory = Path.GetFullPath(diagnostics.RecordDirectory);
+            var startingConnection = api.Client.ConnectionId;
             await api.StartReplayBufferAsync(ct).ConfigureAwait(false);
+            if (api.Client.ConnectionId != startingConnection)
+                throw new IOException("OBS reconnected during replay startup; verify output ownership before continuing.");
             owned = true;
+            connectionId = startingConnection;
             saveUncertain = false;
             return await new ObsInspector(api).InspectAsync(ct: ct).ConfigureAwait(false);
         }
@@ -90,6 +95,8 @@ public sealed class ObsCaptureSession(ObsApi api, ManifestStore store)
         {
             if (!owned || saveUncertain || outputDirectory is null)
                 throw new InvalidOperationException("Start a fresh owned replay session before saving.");
+            if (api.Client.ConnectionId != connectionId)
+                throw new IOException("OBS reconnected; start a fresh replay session after checking its output state.");
             var comparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
             var existing = Directory.EnumerateFiles(outputDirectory, "*", SearchOption.AllDirectories).Select(Path.GetFullPath).ToHashSet(comparer);
             var completion = new TaskCompletionSource<ObsEvent>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -146,6 +153,8 @@ public sealed class ObsCaptureSession(ObsApi api, ManifestStore store)
         {
             if (owned)
             {
+                if (api.Client.ConnectionId != connectionId)
+                    throw new IOException("OBS reconnected; replay ownership needs manual verification before stopping outputs.");
                 await api.StopReplayBufferAsync(ct).ConfigureAwait(false);
                 using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 deadline.CancelAfter(TimeSpan.FromSeconds(10));

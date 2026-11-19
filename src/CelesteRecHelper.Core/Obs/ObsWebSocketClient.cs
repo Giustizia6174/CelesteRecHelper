@@ -32,6 +32,7 @@ public sealed class ObsWebSocketClient : IAsyncDisposable
     private Task? runner;
     private bool disposed;
     public ObsConnectionState State { get; private set; }
+    public Guid ConnectionId { get; private set; }
     public string? LastError { get; private set; }
     public event Action<ObsEvent>? EventReceived;
     public event Action<ObsConnectionState>? StateChanged;
@@ -120,7 +121,7 @@ public sealed class ObsWebSocketClient : IAsyncDisposable
                         identified.GetProperty("d").GetProperty("negotiatedRpcVersion").GetInt32() != 1)
                         throw new InvalidDataException("OBS did not negotiate RPC version 1.");
                 }
-                lock (sync) { socket = current; }
+                lock (sync) { socket = current; ConnectionId = Guid.NewGuid(); }
                 LastError = null;
                 SetState(ObsConnectionState.Connected);
                 lock (sync) { connected.TrySetResult(); }

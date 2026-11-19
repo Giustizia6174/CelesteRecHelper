@@ -105,6 +105,7 @@ public sealed record RouteManifest
     public DateTimeOffset CreatedAtUtc { get; init; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
     public CurrentLife? CurrentLife { get; set; }
+    public RecordingFailure? LastFailure { get; set; }
     public List<ObsSession> ObsSessions { get; init; } = [];
     public List<LogicalSegment> Segments { get; init; } = [];
     public List<MediaAsset> Media { get; init; } = [];

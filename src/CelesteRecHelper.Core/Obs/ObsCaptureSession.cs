@@ -79,7 +79,7 @@ public sealed class ObsCaptureSession(ObsApi api, ManifestStore store)
             var startingConnection = api.Client.ConnectionId;
             await api.StartReplayBufferAsync(ct).ConfigureAwait(false);
             if (api.Client.ConnectionId != startingConnection)
-                throw new IOException("OBS reconnected during replay startup; verify output ownership before continuing.");
+                throw new ObsTransportException("OBS reconnected during replay startup; verify output ownership before continuing.");
             owned = true;
             connectionId = startingConnection;
             saveUncertain = false;
@@ -109,9 +109,9 @@ public sealed class ObsCaptureSession(ObsApi api, ManifestStore store)
             if (!owned || saveUncertain || outputDirectory is null)
                 throw new InvalidOperationException("Start a fresh owned replay session before saving.");
             if (api.Client.ConnectionId != connectionId)
-                throw new IOException("OBS reconnected; start a fresh replay session after checking its output state.");
+                throw new ObsTransportException("OBS reconnected; start a fresh replay session after checking its output state.");
             var comparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
-            var existing = Directory.EnumerateFiles(outputDirectory, "*", SearchOption.AllDirectories).Select(Path.GetFullPath).ToHashSet(comparer);
+            var existing = ReplayOutputFiles.EnumerateTopLevel(outputDirectory).ToHashSet(comparer);
             var completion = new TaskCompletionSource<ObsEvent>(TaskCreationOptions.RunContinuationsAsynchronously);
             var requested = Stopwatch.GetTimestamp();
             var utc = DateTimeOffset.UtcNow;
@@ -128,7 +128,7 @@ public sealed class ObsCaptureSession(ObsApi api, ManifestStore store)
             void OnState(ObsConnectionState state)
             {
                 if (state != ObsConnectionState.Connected)
-                    completion.TrySetException(new IOException("OBS disconnected while a replay save was in flight."));
+                    completion.TrySetException(new ObsTransportException("OBS disconnected while a replay save was in flight."));
             }
             api.Client.EventReceived += OnEvent;
             api.Client.StateChanged += OnState;
@@ -147,7 +147,7 @@ public sealed class ObsCaptureSession(ObsApi api, ManifestStore store)
                 // Persistence may take time; refuse a late or reconnected dispatch.
                 deadline.Token.ThrowIfCancellationRequested();
                 if (api.Client.ConnectionId != connectionId)
-                    throw new IOException("OBS reconnected before the replay request was dispatched.");
+                    throw new ObsTransportException("OBS reconnected before the replay request was dispatched.");
                 await api.SaveReplayBufferAsync(deadline.Token).ConfigureAwait(false);
                 var message = await completion.Task.WaitAsync(deadline.Token).ConfigureAwait(false);
                 var path = Path.GetFullPath(message.Data.GetProperty("savedReplayPath").GetString()!);
@@ -179,7 +179,7 @@ public sealed class ObsCaptureSession(ObsApi api, ManifestStore store)
             if (owned)
             {
                 if (api.Client.ConnectionId != connectionId)
-                    throw new IOException("OBS reconnected; replay ownership needs manual verification before stopping outputs.");
+                    throw new ObsTransportException("OBS reconnected; replay ownership needs manual verification before stopping outputs.");
                 await api.StopReplayBufferAsync(ct).ConfigureAwait(false);
                 using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 deadline.CancelAfter(TimeSpan.FromSeconds(10));

@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CelesteRecHelper.Core.Models;
+using CelesteRecHelper.Core.Obs;
 
 namespace CelesteRecHelper.Core.Persistence;
 
@@ -17,8 +18,6 @@ public sealed class RecoveryReport
 /// <summary>Run once at game startup, before accepting new recording work.</summary>
 public sealed class StartupRecovery(ManifestStore store)
 {
-    private static readonly HashSet<string> MediaExtensions = new(StringComparer.OrdinalIgnoreCase)
-        { ".mkv", ".mp4", ".mov", ".flv", ".ts", ".m4v" };
     private static readonly StringComparer PathComparer = OperatingSystem.IsWindows()
         ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
 
@@ -152,8 +151,7 @@ public sealed class StartupRecovery(ManifestStore store)
             if (!Directory.Exists(request.ExpectedDirectory))
                 return [];
             var existing = request.ExistingFiles.Select(Path.GetFullPath).ToHashSet(PathComparer);
-            return Directory.EnumerateFiles(request.ExpectedDirectory)
-                .Where(path => MediaExtensions.Contains(Path.GetExtension(path)))
+            return ReplayOutputFiles.EnumerateTopLevel(request.ExpectedDirectory)
                 .Select(path => new FileInfo(path))
                 .Where(file => file.Length > 0 &&
                     file.LastWriteTimeUtc >= request.RequestedAtUtc.UtcDateTime.AddSeconds(-2) &&

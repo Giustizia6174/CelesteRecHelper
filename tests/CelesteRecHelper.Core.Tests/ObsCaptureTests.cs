@@ -206,11 +206,11 @@ public sealed class ObsCaptureTests : IDisposable
         var originalConnection = client.ConnectionId;
         var connected = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         client.StateChanged += state => { if (state == ObsConnectionState.Connected && client.ConnectionId != originalConnection) connected.TrySetResult(); };
-        await Assert.ThrowsAsync<IOException>(() => client.RequestAsync("Disconnect"));
+        await Assert.ThrowsAsync<ObsTransportException>(() => client.RequestAsync("Disconnect"));
         await connected.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        await Assert.ThrowsAsync<IOException>(() => recording.StopAsync());
-        await Assert.ThrowsAsync<IOException>(() => buffer.SaveAsync());
-        await Assert.ThrowsAsync<IOException>(() => buffer.StopAsync(server.Endpoint.AbsoluteUri));
+        await Assert.ThrowsAsync<ObsTransportException>(() => recording.StopAsync());
+        await Assert.ThrowsAsync<ObsTransportException>(() => buffer.SaveAsync());
+        await Assert.ThrowsAsync<ObsTransportException>(() => buffer.StopAsync(server.Endpoint.AbsoluteUri));
         Assert.DoesNotContain("StopRecord", backend.Commands);
         Assert.DoesNotContain("StopReplayBuffer", backend.Commands);
         Assert.DoesNotContain("SaveReplayBuffer", backend.Commands);

@@ -105,6 +105,19 @@ public sealed class StartupRecoveryTests : IDisposable
     }
 
     [Fact]
+    public void RecoveryMatchesOnlyTopLevelVideoFilesLikeTheSnapshot()
+    {
+        var route = workspace.NewRoute();
+        workspace.AddPendingSave(route);
+        var nested = Directory.CreateDirectory(Path.Combine(workspace.VideoDirectory, "sub"));
+        File.WriteAllBytes(Path.Combine(nested.FullName, "nested.mkv"), [1, 2, 3]);
+        File.WriteAllText(Path.Combine(workspace.VideoDirectory, "notes.txt"), "not a video");
+        workspace.Store.Save(route);
+        Assert.Equal(1, Recover().FailedSaves);
+        Assert.Empty(workspace.Store.Load(route.RouteId).Media);
+    }
+
+    [Fact]
     public void FilesOutsideTheSaveTimeWindowAreIgnored()
     {
         var route = workspace.NewRoute();

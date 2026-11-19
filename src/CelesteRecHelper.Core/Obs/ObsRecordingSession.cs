@@ -32,7 +32,7 @@ public sealed class ObsRecordingSession(ObsApi api, string expectedDirectory)
     {
         if (!owned) return null;
         if (api.Client.ConnectionId != connectionId || api.Client.State != ObsConnectionState.Connected)
-            throw new IOException("OBS reconnected; recording ownership needs manual verification before stopping outputs.");
+            throw new ObsTransportException("OBS reconnected; recording ownership needs manual verification before stopping outputs.");
         var stopRequested = Stopwatch.GetTimestamp();
         string? responsePath = null;
         var message = await ChangeStateAsync("OBS_WEBSOCKET_OUTPUT_STOPPED", async token =>
@@ -71,7 +71,7 @@ public sealed class ObsRecordingSession(ObsApi api, string expectedDirectory)
         void OnState(ObsConnectionState current)
         {
             if (current != ObsConnectionState.Connected)
-                completion.TrySetException(new IOException("OBS disconnected during a recording state change."));
+                completion.TrySetException(new ObsTransportException("OBS disconnected during a recording state change."));
         }
         api.Client.EventReceived += OnEvent;
         api.Client.StateChanged += OnState;

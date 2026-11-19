@@ -27,6 +27,9 @@ public sealed class ReplaySaveScheduler : IAsyncDisposable
     private bool stopAttempted;
     private Exception? storageFailure;
     private Exception? outputFailure;
+    private RecordingFailureStage outputFailureStage = RecordingFailureStage.Save;
+    private ReplaySaveSnapshot snapshot = null!;
+    public ReplaySaveSnapshot Snapshot => Volatile.Read(ref snapshot);
     public Exception? Failure => Volatile.Read(ref storageFailure) ?? Volatile.Read(ref outputFailure);
 
     public ReplaySaveScheduler(SegmentStateMachine machine, ObsCaptureSession capture,
@@ -45,6 +48,7 @@ public sealed class ReplaySaveScheduler : IAsyncDisposable
             machine.Route.SaveRequests.Any(r => r.Status == SaveRequestStatus.Pending))
             throw new InvalidOperationException("Start a fresh owned replay buffer and a live route before creating its scheduler.");
         session = machine.Route.ObsSessions.Single(s => s.Id == machine.ObsSessionId);
+        PublishSnapshot();
         runner = Task.Run(RunAsync);
     }
 
@@ -56,6 +60,29 @@ public sealed class ReplaySaveScheduler : IAsyncDisposable
     public Task<EndSegmentResult> OnCompletedAsync(long timestamp) =>
         ChangeAsync(() => machine.OnCompleted(timestamp), r => r.Status != EndSegmentStatus.RouteClosed);
     public Task<bool> OnExitAsync(long timestamp) => ChangeAsync(() => machine.OnExit(timestamp), changed => changed);
+
+    /// <summary>Latch a detected connection/output failure without cancelling or misassigning an in-flight result.</summary>
+    public Task SuspendAsync(Exception error)
+    {
+        ArgumentNullException.ThrowIfNull(error);
+        lock (submission)
+        {
+            ObjectDisposedException.ThrowIf(disposal is not null, this);
+            return Submit(() =>
+            {
+                ThrowIfStorageFailed();
+                if (outputFailure is null)
+                {
+                    outputFailure = error;
+                    outputFailureStage = RecordingFailureStage.Buffer;
+                    machine.Route.LastFailure = RecordingFailureClassifier.Classify(error, outputFailureStage);
+                    FailUnassignedSegments(error.Message);
+                    Persist();
+                }
+                return true;
+            });
+        }
+    }
 
     /// <summary>Wait for queued saves, and for output shutdown when the route has ended. Throws any latched failure.</summary>
     public Task WhenIdleAsync()
@@ -92,6 +119,16 @@ public sealed class ReplaySaveScheduler : IAsyncDisposable
         {
             action();
             Pump();
+            PublishSnapshot();
+            if (!busy)
+            {
+                foreach (var waiter in idleWaiters)
+                {
+                    if (Failure is { } failure) waiter.TrySetException(failure);
+                    else waiter.TrySetResult();
+                }
+                idleWaiters.Clear();
+            }
         }
     }
 
@@ -127,12 +164,6 @@ public sealed class ReplaySaveScheduler : IAsyncDisposable
                 return;
             }
         }
-        foreach (var waiter in idleWaiters)
-        {
-            if (Failure is { } failure) waiter.TrySetException(failure);
-            else waiter.TrySetResult();
-        }
-        idleWaiters.Clear();
     }
 
     private async Task SaveBatchAsync(Guid[] segmentIds)
@@ -167,6 +198,7 @@ public sealed class ReplaySaveScheduler : IAsyncDisposable
                 if (failure is not null)
                 {
                     outputFailure = failure;
+                    machine.Route.LastFailure = RecordingFailureClassifier.Classify(failure, RecordingFailureStage.Save);
                     if (requestId is { } id) machine.OnSaveFailed(id, failure.Message);
                     FailUnassignedSegments(failure.Message);
                 }
@@ -191,7 +223,16 @@ public sealed class ReplaySaveScheduler : IAsyncDisposable
             await Submit(() =>
             {
                 busy = false;
-                if (failure is not null) outputFailure ??= failure;
+                if (failure is not null)
+                {
+                    if (outputFailure is null)
+                    {
+                        outputFailure = failure;
+                        outputFailureStage = RecordingFailureStage.Stop;
+                    }
+                    machine.Route.LastFailure = RecordingFailureClassifier.Classify(failure, RecordingFailureStage.Stop);
+                    Persist();
+                }
                 else
                 {
                     session.ReplayBufferWasActive = false;
@@ -202,6 +243,20 @@ public sealed class ReplaySaveScheduler : IAsyncDisposable
             }).ConfigureAwait(false);
         }
         catch (Exception) when (storageFailure is not null) { }
+    }
+
+    private void PublishSnapshot()
+    {
+        var route = machine.Route;
+        var error = Failure;
+        var failure = error is null ? null : RecordingFailureClassifier.Classify(error,
+            storageFailure is not null ? RecordingFailureStage.Manifest : outputFailureStage);
+        // A failed result write must not present the uncommitted in-memory state as saved.
+        var recorded = storageFailure is null ? route.Segments.Count : snapshot.RecordedSegments;
+        var saved = storageFailure is null ? route.Segments.Count(s => s.Status == SegmentStatus.Saved) : snapshot.SavedSegments;
+        var failed = storageFailure is null ? route.Segments.Count(s => s.Status == SegmentStatus.SaveFailed) : snapshot.FailedSegments;
+        Volatile.Write(ref snapshot, new ReplaySaveSnapshot(route.RouteId, route.Status, recorded, saved, failed,
+            busy, capture.OwnsReplayBuffer, failure));
     }
 
     private void FailUnassignedSegments(string reason)

@@ -13,7 +13,11 @@ public sealed class ObsRequestException(string requestType, int code, string com
     : Exception($"OBS {requestType} failed ({code}): {comment}")
 {
     public int Code { get; } = code;
+    public string RequestType { get; } = requestType;
+    public string Comment { get; } = comment;
 }
+public sealed class ObsReplayStoppedException(string message) : Exception(message);
+public sealed class ObsTransportException(string message) : IOException(message);
 public sealed class ObsAuthenticationException(string message) : Exception(message);
 
 /// <summary>RPC 1 client. Reconnects the transport, but never retries state-changing requests.</summary>
@@ -72,7 +76,7 @@ public sealed class ObsWebSocketClient : IAsyncDisposable
         {
             ObjectDisposedException.ThrowIf(disposed, this);
             current = State == ObsConnectionState.Connected && socket is { } active ? active
-                : throw new IOException("OBS is disconnected. The request was not sent.");
+                : throw new ObsTransportException("OBS is disconnected. The request was not sent.");
         }
         var id = Guid.NewGuid().ToString("N");
         var response = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -171,7 +175,7 @@ public sealed class ObsWebSocketClient : IAsyncDisposable
                 }
                 foreach (var pair in pending)
                     if (pending.TryRemove(pair.Key, out var completion))
-                        completion.TrySetException(new IOException("OBS disconnected before responding; the request will not be retried."));
+                        completion.TrySetException(new ObsTransportException("OBS disconnected before responding; the request will not be retried."));
             }
             if (!lifetime.IsCancellationRequested)
             {
@@ -204,7 +208,7 @@ public sealed class ObsWebSocketClient : IAsyncDisposable
             {
                 if ((int?)current.CloseStatus == 4009)
                     throw new ObsAuthenticationException("OBS authentication failed. Check the WebSocket password.");
-                throw new IOException($"OBS closed the connection ({(int?)current.CloseStatus}).");
+                throw new ObsTransportException($"OBS closed the connection ({(int?)current.CloseStatus}).");
             }
             if (result.MessageType != WebSocketMessageType.Text || payload.Length + result.Count > 4 * 1024 * 1024)
                 throw new InvalidDataException("Invalid or oversized OBS protocol message.");

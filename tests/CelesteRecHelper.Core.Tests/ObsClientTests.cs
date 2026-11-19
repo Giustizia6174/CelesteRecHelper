@@ -94,7 +94,7 @@ public sealed class ObsClientTests
         });
         await using var client = new ObsWebSocketClient(server.Endpoint, reconnectDelay: TimeSpan.FromMilliseconds(20));
         await client.ConnectAsync();
-        await Assert.ThrowsAsync<IOException>(() => client.RequestAsync("SaveReplayBuffer"));
+        await Assert.ThrowsAsync<ObsTransportException>(() => client.RequestAsync("SaveReplayBuffer"));
         await reconnected.Task.WaitAsync(TimeSpan.FromSeconds(5));
         await client.ConnectAsync();
         await client.RequestAsync("GetVersion");

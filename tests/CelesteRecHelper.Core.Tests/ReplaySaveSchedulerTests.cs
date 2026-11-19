@@ -56,6 +56,23 @@ public sealed class ReplaySaveSchedulerTests : IDisposable
     }
 
     [Fact]
+    public async Task SnapshotListsOnlyTopLevelVideoFilesSoUnrelatedFilesDoNotGrowTheManifest()
+    {
+        var older = workspace.CreateVideo("older.mkv");
+        for (var i = 0; i < 200; i++) File.WriteAllText(Path.Combine(workspace.VideoDirectory, $"note-{i}.txt"), "x");
+        var nested = Directory.CreateDirectory(Path.Combine(workspace.VideoDirectory, "project", "deep"));
+        for (var i = 0; i < 200; i++) File.WriteAllBytes(Path.Combine(nested.FullName, $"clip-{i}.mkv"), [1]);
+        await using var rig = await StartAsync();
+        await rig.Scheduler.OnGameplayStableAsync(Now);
+        await rig.Scheduler.OnEndKeyAsync(Now, true);
+        var request = Assert.Single((await rig.Output.NextSaveAsync()).SaveRequests);
+        Assert.Equal([Path.GetFullPath(older)], request.ExistingFiles);
+        rig.Output.ReleaseSave();
+        await rig.Scheduler.WhenIdleAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.True(new FileInfo(workspace.Store.GetManifestPath(rig.Route.RouteId)).Length < 64 * 1024);
+    }
+
+    [Fact]
     public async Task ExitReturnsDuringAnInflightSaveAndStopsOnlyAfterBothBatchesAreDurable()
     {
         await using var rig = await StartAsync();
@@ -199,6 +216,8 @@ public sealed class ReplaySaveSchedulerTests : IDisposable
         Assert.Equal(SaveRequestStatus.Pending, Assert.Single(durable.SaveRequests).Status);
         Assert.All(durable.Segments, s => Assert.Equal(SegmentStatus.Recorded, s.Status));
         Assert.Empty(durable.Media);
+        Assert.Equal(0, rig.Scheduler.Snapshot.SavedSegments);
+        Assert.Equal(RecordingFailureStage.Manifest, rig.Scheduler.Snapshot.Failure!.Stage);
         Assert.Equal(1, rig.Output.Commands.Count(c => c == "SaveReplayBuffer"));
         Assert.DoesNotContain("StopReplayBuffer", rig.Output.Commands);
         Assert.True(File.Exists(Path.Combine(workspace.VideoDirectory, "save-1.mkv")));
@@ -250,6 +269,49 @@ public sealed class ReplaySaveSchedulerTests : IDisposable
         Assert.Equal(RouteStatus.Ended, durable.Status);
         Assert.Equal(SegmentStatus.Saved, Assert.Single(durable.Segments).Status);
         Assert.Single(rig.Output.StopSnapshots);
+    }
+
+    [Fact]
+    public async Task SuspensionKeepsTheInflightSuccessButBlocksFutureSavesAndKeepsAStableFailureSnapshot()
+    {
+        await using var rig = await StartAsync();
+        await rig.Scheduler.OnGameplayStableAsync(Now);
+        await rig.Scheduler.OnEndKeyAsync(Now, true);
+        await rig.Output.NextSaveAsync();
+        await rig.Scheduler.SuspendAsync(new ObsTransportException("Connection state changed"));
+        await rig.Scheduler.OnEndKeyAsync(Now, true);
+        rig.Output.ReleaseSave();
+        await Assert.ThrowsAsync<ObsTransportException>(() => rig.Scheduler.WhenIdleAsync().WaitAsync(TimeSpan.FromSeconds(5)));
+        var durable = workspace.Store.Load(rig.Route.RouteId);
+        Assert.Equal(SegmentStatus.Saved, durable.Segments[0].Status);
+        Assert.Equal(SegmentStatus.SaveFailed, durable.Segments[1].Status);
+        Assert.Equal(RecordingFailureKind.Disconnected, durable.LastFailure!.Kind);
+        await rig.Scheduler.OnEndKeyAsync(Now, true);
+        await Assert.ThrowsAsync<ObsTransportException>(() => rig.Scheduler.WhenIdleAsync().WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal(1, rig.Output.Commands.Count(c => c == "SaveReplayBuffer"));
+        Assert.Equal(1, rig.Scheduler.Snapshot.SavedSegments);
+        Assert.Equal(3, rig.Scheduler.Snapshot.RecordedSegments);
+        Assert.Equal(RecordingFailureKind.Disconnected, rig.Scheduler.Snapshot.Failure!.Kind);
+        Assert.True(rig.Scheduler.Snapshot.ReplayBufferOwned);
+    }
+
+    [Fact]
+    public async Task ObsErrorCodeAndCommentRemainAvailableInTheSuspendedStatusAndOnDisk()
+    {
+        await using var rig = await StartAsync();
+        await rig.Scheduler.OnGameplayStableAsync(Now);
+        await rig.Scheduler.OnEndKeyAsync(Now, true);
+        await rig.Output.NextSaveAsync();
+        await rig.Scheduler.SuspendAsync(new ObsRequestException("SaveReplayBuffer", 501, "Output is not running"));
+        rig.Output.ReleaseSave();
+        await Assert.ThrowsAsync<ObsRequestException>(() => rig.Scheduler.WhenIdleAsync().WaitAsync(TimeSpan.FromSeconds(5)));
+        await rig.Scheduler.OnEndKeyAsync(Now, true);
+        await Assert.ThrowsAsync<ObsRequestException>(() => rig.Scheduler.WhenIdleAsync().WaitAsync(TimeSpan.FromSeconds(5)));
+        var failure = workspace.Store.Load(rig.Route.RouteId).LastFailure!;
+        Assert.Equal(501, failure.ObsCode);
+        Assert.Equal("Output is not running", failure.ObsComment);
+        Assert.Equal("rechelper_error_obs_notrunning", rig.Scheduler.Snapshot.Failure!.MessageKey);
+        Assert.Equal(1, rig.Output.Commands.Count(c => c == "SaveReplayBuffer"));
     }
 
     private async Task<Rig> StartAsync(Action<RouteManifest>? persist = null, TimeSpan? timeout = null)

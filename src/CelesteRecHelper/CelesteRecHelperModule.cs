@@ -10,6 +10,7 @@ public sealed class CelesteRecHelperModule : EverestModule
     public ManifestStore? Manifests { get; private set; }
     public RecoveryReport? Recovery { get; private set; }
     private ObsMenu? obsMenu;
+    private GameRecordingAdapter? recording;
 
     public CelesteRecHelperModule() => Instance = this;
 
@@ -21,6 +22,7 @@ public sealed class CelesteRecHelperModule : EverestModule
             Manifests = new ManifestStore(Path.Combine(Everest.PathSettings, "CelesteRecHelper"));
             Recovery = new StartupRecovery(Manifests).Recover();
             obsMenu = new ObsMenu(this);
+            recording = new GameRecordingAdapter(Manifests);
             Logger.Log(LogLevel.Info, "CelesteRecHelper",
                 $"Manifest storage initialized. Data: {Manifests.RootDirectory}; interrupted routes: " +
                 $"{Recovery.InterruptedRoutes.Count}; recovered saves: {Recovery.RecoveredSaves}; " +
@@ -46,6 +48,8 @@ public sealed class CelesteRecHelperModule : EverestModule
 
     public override void Unload()
     {
+        recording?.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        recording = null;
         obsMenu?.DisposeAsync().AsTask().GetAwaiter().GetResult();
         obsMenu = null;
         Recovery = null;

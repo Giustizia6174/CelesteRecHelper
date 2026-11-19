@@ -314,7 +314,75 @@ public sealed class ReplaySaveSchedulerTests : IDisposable
         Assert.Equal(1, rig.Output.Commands.Count(c => c == "SaveReplayBuffer"));
     }
 
-    private async Task<Rig> StartAsync(Action<RouteManifest>? persist = null, TimeSpan? timeout = null)
+    [Fact]
+    public async Task CuttingDoesNotBlockLaterSavesAndDisposeDrainsCutsBeforeReturning()
+    {
+        var cuts = Channel.CreateUnbounded<SegmentCutRequest>();
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var rig = await StartAsync(cut: async (request, _) =>
+        {
+            Assert.Equal(SaveRequestStatus.Saved, workspace.Store.Load(request.RouteId).SaveRequests
+                .Single(save => save.Id == request.SaveRequestId).Status);
+            cuts.Writer.TryWrite(request);
+            await release.Task;
+            return SegmentCutTests.Success(request, workspace.CreateVideo($"clip-{request.Segments[0].Sequence}.mkv"));
+        });
+        try
+        {
+            await rig.Scheduler.OnGameplayStableAsync(Now);
+            await rig.Scheduler.OnEndKeyAsync(Now, true);
+            await rig.Output.NextSaveAsync();
+            rig.Output.ReleaseSave();
+            var first = await cuts.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+            await rig.Scheduler.OnEndKeyAsync(Now, true).WaitAsync(TimeSpan.FromSeconds(3));
+            await rig.Output.NextSaveAsync();
+            rig.Output.ReleaseSave();
+            await cuts.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.True(File.Exists(first.SourcePath));
+            var closing = rig.Scheduler.DisposeAsync().AsTask();
+            Assert.False(closing.IsCompleted);
+            release.TrySetResult();
+            await closing.WaitAsync(TimeSpan.FromSeconds(5));
+            var route = workspace.Store.Load(rig.Route.RouteId);
+            Assert.All(route.Segments, segment => Assert.Equal(SegmentSliceStatus.Succeeded, segment.SliceStatus));
+            Assert.All(route.Media, media => Assert.Equal(MediaKind.SegmentClip, media.Kind));
+            Assert.False(File.Exists(first.SourcePath));
+            Assert.Equal(2, rig.Output.Commands.Count(command => command == "SaveReplayBuffer"));
+            Assert.Equal(2, rig.Scheduler.Snapshot.CutSegments);
+            Assert.Equal(0, rig.Scheduler.Snapshot.PendingCuts);
+        }
+        finally { release.TrySetResult(); }
+    }
+
+    [Fact]
+    public async Task AWorkerFailureKeepsSavedReplaysAndDoesNotSuspendObsSaves()
+    {
+        await using var rig = await StartAsync(cut: (_, _) => throw new IOException("ffmpeg failed"));
+        await rig.Scheduler.OnGameplayStableAsync(Now);
+        for (var i = 0; i < 2; i++)
+        {
+            await rig.Scheduler.OnEndKeyAsync(Now, true);
+            await rig.Output.NextSaveAsync();
+            rig.Output.ReleaseSave();
+            await rig.Scheduler.WhenIdleAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        await rig.Scheduler.DisposeAsync();
+        var route = workspace.Store.Load(rig.Route.RouteId);
+        Assert.Null(rig.Scheduler.Failure);
+        Assert.Equal(2, rig.Scheduler.Snapshot.FailedCuts);
+        Assert.Equal(2, rig.Scheduler.Snapshot.SavedSegments);
+        Assert.All(route.SaveRequests, request => Assert.Equal(SaveRequestStatus.Saved, request.Status));
+        Assert.All(route.Segments, segment =>
+        {
+            Assert.Equal(SegmentStatus.Saved, segment.Status);
+            Assert.Equal(SegmentSliceStatus.Failed, segment.SliceStatus);
+            Assert.Equal("ffmpeg failed", segment.SliceFailureReason);
+        });
+        Assert.All(route.Media, media => Assert.True(File.Exists(media.FilePath)));
+    }
+
+    private async Task<Rig> StartAsync(Action<RouteManifest>? persist = null, TimeSpan? timeout = null,
+        Func<SegmentCutRequest, CancellationToken, Task<SegmentCutResult>>? cut = null)
     {
         var output = new Outputs(workspace);
         var server = await ObsTestServer.StartAsync(output.RunAsync);
@@ -330,7 +398,7 @@ public sealed class ReplaySaveSchedulerTests : IDisposable
         var route = new RouteManifest { SaveSlot = 0, MapSid = "test/map", MapName = "测试地图", ObsSessions = [session] };
         output.RouteId = route.RouteId;
         var scheduler = new ReplaySaveScheduler(new SegmentStateMachine(route, session.Id), capture,
-            persist ?? workspace.Store.Save, server.Endpoint.AbsoluteUri, timeout);
+            persist ?? workspace.Store.Save, server.Endpoint.AbsoluteUri, timeout, cut);
         return new Rig(scheduler, route, output, capture, client, server);
     }
 

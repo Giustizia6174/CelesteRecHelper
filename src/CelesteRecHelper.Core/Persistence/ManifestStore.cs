@@ -67,8 +67,12 @@ public sealed class ManifestStore
         ? AtomicJsonFile.Read<ObsDirectoryRecoveryRecord>(ObsRecoveryPath) : null;
     public void ClearObsRecovery() => File.Delete(ObsRecoveryPath);
 
+    public string GetJobDirectory(Guid jobId) => Path.Combine(JobsDirectory, jobId.ToString("N"));
+    public string GetJobRequestPath(Guid jobId) => Path.Combine(GetJobDirectory(jobId), "request.json");
+    public string GetJobResultPath(Guid jobId) => Path.Combine(GetJobDirectory(jobId), "result.json");
+
     public void SaveJobStatus(BackgroundJobStatus status) =>
-        AtomicJsonFile.Write(Path.Combine(JobsDirectory, status.JobId.ToString("N"), "status.json"), status);
+        AtomicJsonFile.Write(Path.Combine(GetJobDirectory(status.JobId), "status.json"), status);
 
     public IEnumerable<string> EnumerateJobStatusPaths() => Directory.Exists(JobsDirectory)
         ? Directory.EnumerateFiles(JobsDirectory, "status.json", SearchOption.AllDirectories)
@@ -113,6 +117,9 @@ public sealed class ManifestStore
 
         bool ValidReferences(List<MediaReference> references, Guid sessionId) => references.All(reference =>
             reference is not null && reference.EndTimestamp >= reference.StartTimestamp &&
+            ((reference.StartSeconds is null && reference.EndSeconds is null) ||
+                (reference.StartSeconds is { } start && reference.EndSeconds is { } end &&
+                    double.IsFinite(start) && double.IsFinite(end) && start >= 0 && end > start)) &&
             mediaById.TryGetValue(reference.MediaId, out var media) && media.ObsSessionId == sessionId);
     }
 }

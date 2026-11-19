@@ -22,7 +22,8 @@ public sealed class CelesteRecHelperModule : EverestModule
             Manifests = new ManifestStore(Path.Combine(Everest.PathSettings, "CelesteRecHelper"));
             Recovery = new StartupRecovery(Manifests).Recover();
             obsMenu = new ObsMenu(this);
-            recording = new GameRecordingAdapter(Manifests);
+            recording = new GameRecordingAdapter(Manifests,
+                Path.Combine(Metadata.PathDirectory, "worker", "CelesteRecHelper.Worker.exe"));
             Logger.Log(LogLevel.Info, "CelesteRecHelper",
                 $"Manifest storage initialized. Data: {Manifests.RootDirectory}; interrupted routes: " +
                 $"{Recovery.InterruptedRoutes.Count}; recovered saves: {Recovery.RecoveredSaves}; " +

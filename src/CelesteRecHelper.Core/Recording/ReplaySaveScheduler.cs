@@ -16,7 +16,10 @@ public sealed class ReplaySaveScheduler : IAsyncDisposable
     private readonly Action<RouteManifest> persist;
     private readonly string endpoint;
     private readonly TimeSpan saveTimeout;
+    private readonly Func<SegmentCutRequest, CancellationToken, Task<SegmentCutResult>>? cut;
     private readonly ObsSession session;
+    private readonly object cutsGate = new();
+    private readonly List<Task> cuts = [];
     private readonly Channel<Action> work = Channel.CreateUnbounded<Action>(new UnboundedChannelOptions
         { SingleReader = true, AllowSynchronousContinuations = false });
     private readonly List<TaskCompletionSource> idleWaiters = [];
@@ -33,7 +36,8 @@ public sealed class ReplaySaveScheduler : IAsyncDisposable
     public Exception? Failure => Volatile.Read(ref storageFailure) ?? Volatile.Read(ref outputFailure);
 
     public ReplaySaveScheduler(SegmentStateMachine machine, ObsCaptureSession capture,
-        Action<RouteManifest> persist, string endpoint, TimeSpan? saveTimeout = null)
+        Action<RouteManifest> persist, string endpoint, TimeSpan? saveTimeout = null,
+        Func<SegmentCutRequest, CancellationToken, Task<SegmentCutResult>>? cut = null)
     {
         ArgumentNullException.ThrowIfNull(machine);
         ArgumentNullException.ThrowIfNull(capture);
@@ -43,6 +47,7 @@ public sealed class ReplaySaveScheduler : IAsyncDisposable
         this.persist = persist;
         this.endpoint = endpoint;
         this.saveTimeout = saveTimeout ?? TimeSpan.FromSeconds(10);
+        this.cut = cut;
         if (this.saveTimeout <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(saveTimeout));
         if (!capture.OwnsReplayBuffer || machine.Route.Status != RouteStatus.Recording ||
             machine.Route.SaveRequests.Any(r => r.Status == SaveRequestStatus.Pending))
@@ -192,7 +197,10 @@ public sealed class ReplaySaveScheduler : IAsyncDisposable
                 if (storageFailure is not null) return false;
                 if (failure is null)
                 {
-                    try { machine.OnSaveSucceeded(requestId!.Value, saved!); }
+                    try
+                    {
+                        machine.OnSaveSucceeded(requestId!.Value, saved!);
+                    }
                     catch (Exception e) { failure = e; }
                 }
                 if (failure is not null)
@@ -202,11 +210,65 @@ public sealed class ReplaySaveScheduler : IAsyncDisposable
                     if (requestId is { } id) machine.OnSaveFailed(id, failure.Message);
                     FailUnassignedSegments(failure.Message);
                 }
-                Persist(); // Publish this result before Pump can send another request or stop the buffer.
+                Persist(); // Publish the OBS result before starting cuts, sending another save, or stopping the buffer.
+                if (failure is null && cut is not null)
+                {
+                    try { QueueCut(machine.CreateCutRequest(requestId!.Value)); }
+                    catch (Exception e)
+                    {
+                        // Cutting is independent: a saved replay remains Saved and later OBS requests may proceed.
+                        machine.OnCutFailed(requestId!.Value, e.Message);
+                        Persist();
+                    }
+                }
                 return true;
             }).ConfigureAwait(false);
         }
         catch (Exception) when (storageFailure is not null) { /* Reported by Failure/WhenIdleAsync; no further output commands. */ }
+    }
+
+    private void QueueCut(SegmentCutRequest request)
+    {
+        if (cut is null) return;
+        var task = Task.Run(async () =>
+        {
+            SegmentCutResult result;
+            try
+            {
+                result = await cut(request, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception e)
+            {
+                result = new SegmentCutResult
+                {
+                    RouteId = request.RouteId, SaveRequestId = request.SaveRequestId,
+                    SourceMediaId = request.SourceMediaId, ObsSessionId = request.ObsSessionId,
+                    SourcePath = request.SourcePath,
+                    Segments = request.Segments.Select(item => new SegmentCutItemResult
+                    {
+                        SegmentId = item.SegmentId, Sequence = item.Sequence, Succeeded = false, Error = e.Message
+                    }).ToList()
+                };
+            }
+            try
+            {
+                await Submit(() =>
+                {
+                    if (storageFailure is not null) return false;
+                    try { machine.ApplyCutResult(result); }
+                    catch (Exception e) { machine.OnCutFailed(request.SaveRequestId, e.Message); }
+                    Persist();
+                    SegmentCutFiles.RemoveUnusedReplays(machine, PersistRoute);
+                    return true;
+                }).ConfigureAwait(false);
+            }
+            catch (Exception) when (storageFailure is not null) { }
+        });
+        lock (cutsGate) cuts.Add(task);
+        _ = task.ContinueWith(_ =>
+        {
+            lock (cutsGate) cuts.Remove(task);
+        }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
     }
 
     private async Task StopOutputAsync()
@@ -255,8 +317,13 @@ public sealed class ReplaySaveScheduler : IAsyncDisposable
         var recorded = storageFailure is null ? route.Segments.Count : snapshot.RecordedSegments;
         var saved = storageFailure is null ? route.Segments.Count(s => s.Status == SegmentStatus.Saved) : snapshot.SavedSegments;
         var failed = storageFailure is null ? route.Segments.Count(s => s.Status == SegmentStatus.SaveFailed) : snapshot.FailedSegments;
+        var cutSegments = storageFailure is null ? route.Segments.Count(s => s.SliceStatus == SegmentSliceStatus.Succeeded) : snapshot.CutSegments;
+        var pendingCuts = storageFailure is null ? route.Segments.Count(s => s.Status == SegmentStatus.Saved &&
+            s.SliceStatus == SegmentSliceStatus.Pending) : snapshot.PendingCuts;
+        var failedCuts = storageFailure is null ? route.Segments.Count(s => s.Status == SegmentStatus.Saved &&
+            s.SliceStatus == SegmentSliceStatus.Failed) : snapshot.FailedCuts;
         Volatile.Write(ref snapshot, new ReplaySaveSnapshot(route.RouteId, route.Status, recorded, saved, failed,
-            busy, capture.OwnsReplayBuffer, failure));
+            busy, capture.OwnsReplayBuffer, failure, cutSegments, pendingCuts, failedCuts));
     }
 
     private void FailUnassignedSegments(string reason)
@@ -269,9 +336,11 @@ public sealed class ReplaySaveScheduler : IAsyncDisposable
         }
     }
 
-    private void Persist()
+    private void Persist() => PersistRoute(machine.Route);
+
+    private void PersistRoute(RouteManifest route)
     {
-        try { persist(machine.Route); }
+        try { persist(route); }
         catch (Exception e)
         {
             storageFailure = e;
@@ -290,6 +359,17 @@ public sealed class ReplaySaveScheduler : IAsyncDisposable
         var idle = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         await Submit(() => { idleWaiters.Add(idle); return true; }).ConfigureAwait(false);
         await idle.Task.ConfigureAwait(false);
+    }
+
+    private async Task WaitForCutsAsync()
+    {
+        while (true)
+        {
+            Task[] pending;
+            lock (cutsGate) pending = cuts.Where(task => !task.IsCompleted).ToArray();
+            if (pending.Length == 0) return;
+            await Task.WhenAll(pending).ConfigureAwait(false);
+        }
     }
 
     public ValueTask DisposeAsync()
@@ -315,6 +395,8 @@ public sealed class ReplaySaveScheduler : IAsyncDisposable
         }
         catch (Exception e) { failure = e; }
         try { await WaitForIdleCoreAsync().ConfigureAwait(false); }
+        catch (Exception e) { failure ??= e; }
+        try { await WaitForCutsAsync().ConfigureAwait(false); }
         catch (Exception e) { failure ??= e; }
         finally
         {

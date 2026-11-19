@@ -18,7 +18,15 @@ public sealed class MediaProbe(string executable)
         return OperatingSystem.IsWindows() ? "ffprobe.exe" : "ffprobe";
     }
 
-    public async Task<MediaProbeResult> ProbeAsync(string filePath, CancellationToken ct = default)
+    public Task<MediaProbeResult> ProbeAsync(string filePath, CancellationToken ct = default) =>
+        ReadAsync(filePath, decodeFrames: true, ct);
+
+    /// <summary>Packet PTS bounds avoid decoding the replay during stream-copy slicing.
+    /// This checks coverage and metadata; it is not a full decode validation.</summary>
+    public Task<MediaProbeResult> ProbeForStreamCopyAsync(string filePath, CancellationToken ct = default) =>
+        ReadAsync(filePath, decodeFrames: false, ct);
+
+    private async Task<MediaProbeResult> ReadAsync(string filePath, bool decodeFrames, CancellationToken ct)
     {
         filePath = Path.GetFullPath(filePath);
         if (!File.Exists(filePath)) throw new FileNotFoundException("Video file does not exist.", filePath);
@@ -28,7 +36,7 @@ public sealed class MediaProbe(string executable)
         if (video.ValueKind == JsonValueKind.Undefined) throw new InvalidDataException("No video stream was found.");
         var duration = Number(metadata.GetProperty("format"), "duration") ?? Number(video, "duration");
         if (duration is not > 0) throw new InvalidDataException("The video duration is missing or invalid.");
-        var (first, last) = await FrameBoundsAsync(filePath, ct).ConfigureAwait(false);
+        var (first, last) = await FrameBoundsAsync(filePath, decodeFrames, ct).ConfigureAwait(false);
         var audio = streams.Where(s => Text(s, "codec_type") == "audio").Select(s => new AudioTrackInfo(
             s.GetProperty("index").GetInt32(), Text(s, "codec_name") ?? "unknown",
             (int)(Number(s, "sample_rate") ?? 0), (int)(Number(s, "channels") ?? 0), Text(s, "channel_layout"),
@@ -53,10 +61,11 @@ public sealed class MediaProbe(string executable)
         finally { KillIfRunning(process); }
     }
 
-    private async Task<(double First, double Last)> FrameBoundsAsync(string filePath, CancellationToken ct)
+    private async Task<(double First, double Last)> FrameBoundsAsync(string filePath, bool decodeFrames, CancellationToken ct)
     {
-        using var process = Start(["-v", "error", "-select_streams", "v:0", "-show_frames", "-show_entries",
-            "frame=best_effort_timestamp_time", "-of", "compact=p=0:nk=0", filePath]);
+        var fieldName = decodeFrames ? "best_effort_timestamp_time" : "pts_time";
+        using var process = Start(["-v", "error", "-select_streams", "v:0", decodeFrames ? "-show_frames" : "-show_packets", "-show_entries",
+            decodeFrames ? "frame=best_effort_timestamp_time" : "packet=pts_time", "-of", "compact=p=0:nk=0", filePath]);
         var stderr = process.StandardError.ReadToEndAsync(ct);
         double? first = null;
         double? last = null;
@@ -64,7 +73,7 @@ public sealed class MediaProbe(string executable)
         {
             while (await process.StandardOutput.ReadLineAsync(ct).ConfigureAwait(false) is { } line)
                 foreach (var field in line.Split('|'))
-                    if (field.StartsWith("best_effort_timestamp_time=", StringComparison.Ordinal) &&
+                    if (field.StartsWith(fieldName + "=", StringComparison.Ordinal) &&
                         double.TryParse(field[(field.IndexOf('=') + 1)..], NumberStyles.Float, CultureInfo.InvariantCulture, out var time) &&
                         double.IsFinite(time))
                     {

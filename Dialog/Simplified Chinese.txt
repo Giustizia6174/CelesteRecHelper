@@ -63,3 +63,6 @@ rechelper_error_output_unsupported= 当前 OBS 输出模式不支持回放采集
 rechelper_error_replay_unavailable= OBS 回放缓存不可用，请检查输出设置。
 rechelper_error_buffer_stopped= 助手持有的 OBS 回放缓存已停止，自动保存已暂停。
 rechelper_error_start_notready= 通关时采集尚未就绪，未确认保存片段。
+rechelper_recording_cut_counts= 已切片：
+rechelper_recording_cut_pending= 正在后台切片，自动保存继续。
+rechelper_recording_cut_failed= 切片失败，原回放已保留，下次启动重试。

@@ -156,6 +156,138 @@ public sealed class SegmentStateMachine
         return true;
     }
 
+    /// <summary>Builds an immutable worker request for the replay file attached to a saved OBS request.</summary>
+    public SegmentCutRequest CreateCutRequest(Guid requestId)
+    {
+        var request = GetRequest(requestId);
+        if (request.Status != SaveRequestStatus.Saved || string.IsNullOrWhiteSpace(request.OutputPath))
+            throw new InvalidOperationException("Only a completed replay save can be cut.");
+        var source = route.Media.SingleOrDefault(media => media.SaveRequestId == request.Id &&
+            PathComparer.Equals(Path.GetFullPath(media.FilePath), Path.GetFullPath(request.OutputPath)))
+            ?? throw new InvalidOperationException("The saved replay source is missing from the manifest.");
+        var segments = route.Segments.Where(segment => segment.SaveRequestId == request.Id &&
+                segment.Status == SegmentStatus.Saved && segment.SliceStatus != SegmentSliceStatus.Succeeded)
+            .Select(segment => new SegmentCutItem
+            {
+                SegmentId = segment.Id,
+                Sequence = route.Segments.IndexOf(segment) + 1,
+                StartTimestamp = segment.StartTimestamp,
+                EndTimestamp = segment.EndTimestamp
+            }).ToList();
+        if (segments.Count == 0) throw new InvalidOperationException("The saved replay has no pending segments to cut.");
+        var frequency = session.Clock.Frequency;
+        if (frequency <= 0) throw new InvalidOperationException("The OBS session clock frequency is invalid.");
+        return new SegmentCutRequest
+        {
+            RouteId = route.RouteId, SaveRequestId = request.Id, SourceMediaId = source.Id,
+            ObsSessionId = session.Id, SourcePath = source.FilePath, OutputDirectory = session.OutputDirectory,
+            MapName = route.MapName, ClockFrequency = frequency,
+            SaveRequestedAtTimestamp = request.RequestedAtTimestamp, Segments = segments
+        };
+    }
+
+    public void OnCutFailed(Guid requestId, string reason)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(reason);
+        var request = GetRequest(requestId);
+        foreach (var segment in route.Segments.Where(segment => segment.SaveRequestId == request.Id &&
+            segment.Status == SegmentStatus.Saved && segment.SliceStatus != SegmentSliceStatus.Succeeded))
+        {
+            segment.SliceStatus = SegmentSliceStatus.Failed;
+            segment.SliceFailureReason = reason;
+        }
+    }
+
+    /// <summary>Applies only verified worker outputs. The caller deletes SourcePathToDelete after persisting this state.</summary>
+    public SegmentCutApplyResult ApplyCutResult(SegmentCutResult result)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+        if (result.RouteId != route.RouteId || result.ObsSessionId != session.Id)
+            throw new ArgumentException("The cut result does not belong to this route or OBS session.", nameof(result));
+        var request = GetRequest(result.SaveRequestId);
+        if (request.Status != SaveRequestStatus.Saved || string.IsNullOrWhiteSpace(request.OutputPath) ||
+            !PathComparer.Equals(Path.GetFullPath(request.OutputPath), Path.GetFullPath(result.SourcePath)))
+            throw new ArgumentException("The cut result does not match the saved replay request.", nameof(result));
+        var source = route.Media.SingleOrDefault(media => media.Id == result.SourceMediaId)
+            ?? throw new ArgumentException("The cut source is not registered in the route.", nameof(result));
+        if (source.Kind != MediaKind.ReplayBuffer || source.SaveRequestId != request.Id ||
+            !PathComparer.Equals(Path.GetFullPath(source.FilePath), Path.GetFullPath(result.SourcePath)))
+            throw new ArgumentException("The cut source path does not match the registered media.", nameof(result));
+
+        var expected = route.Segments.Where(segment => segment.SaveRequestId == request.Id &&
+            segment.SliceStatus != SegmentSliceStatus.Succeeded).Select(segment => segment.Id).ToHashSet();
+        if (result.Segments.Select(item => item.SegmentId).Distinct().Count() != result.Segments.Count ||
+            !expected.IsSubsetOf(result.Segments.Select(item => item.SegmentId)))
+            throw new ArgumentException("The cut result is missing segments or contains duplicates.", nameof(result));
+        // Validate the whole batch before changing any references.
+        foreach (var item in result.Segments)
+        {
+            var segment = route.Segments.SingleOrDefault(candidate => candidate.Id == item.SegmentId);
+            if (segment is null || segment.SaveRequestId != request.Id || segment.ObsSessionId != session.Id ||
+                item.Sequence != route.Segments.IndexOf(segment) + 1)
+                throw new ArgumentException("The cut result contains a segment from another request.", nameof(result));
+            if (segment.SliceStatus == SegmentSliceStatus.Succeeded || !item.Succeeded) continue;
+            if (string.IsNullOrWhiteSpace(item.FilePath) || !Path.IsPathFullyQualified(item.FilePath) ||
+                PathComparer.Equals(Path.GetFullPath(item.FilePath), Path.GetFullPath(source.FilePath)) ||
+                item.Probe is null || item.Probe.FileSizeBytes <= 0 || item.Probe.DurationSeconds <= 0 ||
+                !PathComparer.Equals(Path.GetFullPath(item.Probe.FilePath), Path.GetFullPath(item.FilePath)) ||
+                item.StartSeconds is not { } start || item.EndSeconds is not { } end ||
+                !double.IsFinite(start) || !double.IsFinite(end) || start < 0 || end <= start ||
+                end > item.Probe.DurationSeconds + 0.1)
+                throw new ArgumentException("A successful cut result must identify a valid, probed output and exact bounds.", nameof(result));
+        }
+        foreach (var item in result.Segments)
+        {
+            var segment = route.Segments.Single(candidate => candidate.Id == item.SegmentId);
+            if (segment.SliceStatus == SegmentSliceStatus.Succeeded) continue;
+            if (!item.Succeeded)
+            {
+                segment.SliceStatus = SegmentSliceStatus.Failed;
+                segment.SliceFailureReason = string.IsNullOrWhiteSpace(item.Error) ? "The media worker could not cut this segment." : item.Error;
+                continue;
+            }
+            var output = Path.GetFullPath(item.FilePath!);
+            var existing = route.Media.SingleOrDefault(media => PathComparer.Equals(Path.GetFullPath(media.FilePath), output));
+            if (existing is null)
+            {
+                existing = new MediaAsset
+                {
+                    ObsSessionId = session.Id, FilePath = output, Kind = MediaKind.SegmentClip,
+                    SaveRequestId = request.Id, Probe = item.Probe
+                };
+                route.Media.Add(existing);
+            }
+            else if (existing.Kind != MediaKind.SegmentClip || existing.ObsSessionId != session.Id)
+                throw new ArgumentException("A cut output path is already used by incompatible media.", nameof(result));
+            segment.Media.RemoveAll(reference => reference.MediaId == source.Id);
+            segment.Media.RemoveAll(reference => reference.MediaId == existing.Id);
+            segment.Media.Add(new MediaReference
+            {
+                MediaId = existing.Id, StartTimestamp = segment.StartTimestamp, EndTimestamp = segment.EndTimestamp,
+                StartSeconds = item.StartSeconds, EndSeconds = item.EndSeconds
+            });
+            segment.SliceStatus = SegmentSliceStatus.Succeeded;
+            segment.SliceFailureReason = null;
+        }
+
+        var sourceStillReferenced = route.Segments.Any(segment => segment.Media.Any(reference => reference.MediaId == source.Id)) ||
+            route.CurrentLife?.PendingMedia.Any(reference => reference.MediaId == source.Id) == true;
+        var sourceSegments = route.Segments.Where(segment => segment.SaveRequestId == request.Id).ToArray();
+        var allSourceSegmentsCut = sourceSegments.Length > 0 && sourceSegments.All(segment =>
+            segment.SliceStatus == SegmentSliceStatus.Succeeded);
+        return !sourceStillReferenced && allSourceSegmentsCut
+            ? new SegmentCutApplyResult(source.FilePath, source.Id)
+            : new SegmentCutApplyResult(null, null);
+    }
+
+    public void RemoveMedia(Guid mediaId)
+    {
+        if (route.Segments.Any(segment => segment.Media.Any(reference => reference.MediaId == mediaId)) ||
+            route.CurrentLife?.PendingMedia.Any(reference => reference.MediaId == mediaId) == true)
+            throw new InvalidOperationException("Cannot remove media that is still referenced by the route.");
+        route.Media.RemoveAll(media => media.Id == mediaId);
+    }
+
     private EndSegmentResult RecordEnd(long timestamp)
     {
         if (route.CurrentLife is not { } life) return new(EndSegmentStatus.NoActiveLife);

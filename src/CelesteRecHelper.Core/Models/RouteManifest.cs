@@ -4,7 +4,8 @@ namespace CelesteRecHelper.Core.Models;
 
 public enum RouteStatus { Recording, Completed, Ended, Interrupted }
 public enum SegmentStatus { Recorded, Saved, SaveFailed }
-public enum MediaKind { ReplayBuffer, Recording }
+public enum MediaKind { ReplayBuffer, Recording, SegmentClip }
+public enum SegmentSliceStatus { Pending, Succeeded, Failed }
 public enum SaveRequestStatus { Pending, Saved, Failed }
 
 /// <summary>One process clock. Raw timestamps are meaningful only within this clock.</summary>
@@ -50,6 +51,8 @@ public sealed record LogicalSegment
     public SegmentStatus Status { get; set; } = SegmentStatus.Recorded;
     public Guid? SaveRequestId { get; set; }
     public string? FailureReason { get; set; }
+    public SegmentSliceStatus SliceStatus { get; set; } = SegmentSliceStatus.Pending;
+    public string? SliceFailureReason { get; set; }
     public List<MediaReference> Media { get; init; } = [];
 }
 
@@ -59,6 +62,9 @@ public sealed record MediaReference
     public required Guid MediaId { get; init; }
     public required long StartTimestamp { get; init; }
     public required long EndTimestamp { get; init; }
+    // Exact logical bounds in a validated clip, including any keyframe/audio timestamp offset.
+    public double? StartSeconds { get; init; }
+    public double? EndSeconds { get; init; }
 }
 
 public sealed record MediaAsset

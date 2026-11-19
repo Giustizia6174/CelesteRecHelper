@@ -63,3 +63,6 @@ rechelper_error_output_unsupported= The current OBS output mode is not supported
 rechelper_error_replay_unavailable= The OBS replay buffer is unavailable; check OBS output settings.
 rechelper_error_buffer_stopped= The owned OBS replay buffer stopped; automatic saving is paused.
 rechelper_error_start_notready= Capture was not ready before chapter completion; no segment is confirmed saved.
+rechelper_recording_cut_counts= Clips ready:
+rechelper_recording_cut_pending= Creating clips; automatic replay saving continues.
+rechelper_recording_cut_failed= Clip creation failed. Original replay retained; retry on next launch.

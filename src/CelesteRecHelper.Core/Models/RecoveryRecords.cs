@@ -19,5 +19,8 @@ public sealed record BackgroundJobStatus
     public required Guid RouteId { get; init; }
     public required BackgroundJobState State { get; init; }
     public string? Error { get; init; }
+    public string Kind { get; init; } = "unknown";
+    public string? RequestPath { get; init; }
+    public string? ResultPath { get; init; }
     public DateTimeOffset UpdatedAtUtc { get; init; } = DateTimeOffset.UtcNow;
 }

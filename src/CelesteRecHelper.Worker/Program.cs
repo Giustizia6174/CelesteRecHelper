@@ -8,9 +8,10 @@ using CelesteRecHelper.Worker.Media;
 var json = new JsonSerializerOptions { WriteIndented = true, Converters = { new JsonStringEnumConverter() } };
 if (args.Length == 0 || args is ["--help"] or ["-h"])
 {
-    Console.WriteLine("CelesteRecHelper.Worker — stage 3");
+    Console.WriteLine("CelesteRecHelper.Worker — stage 4");
     Console.WriteLine("routes <data-directory>");
     Console.WriteLine("probe <video> [--ffprobe <executable>] [--output <json>]");
+    Console.WriteLine("cut-segments <request.json> [--ffmpeg <executable>] [--ffprobe <executable>] [--output <json>]");
     Console.WriteLine("obs-check [--endpoint <ws://host:port>] [--password-env <variable>]");
     Console.WriteLine("obs-save --data-dir <Saves/CelesteRecHelper directory> [--endpoint <uri>] [--password-env <variable>] [--wait-seconds <seconds>]");
     Console.WriteLine("         [--output-directory <videos>] [--ffprobe <exe>] [--output <json>]");
@@ -36,6 +37,7 @@ try
     {
         "routes" => Array.Empty<string>(),
         "probe" => ["--ffprobe", "--output"],
+        "cut-segments" => ["--ffmpeg", "--ffprobe", "--output"],
         "obs-check" => ["--endpoint", "--password-env"],
         "verify-handoff" => ["--ffmpeg", "--ffprobe", "--output"],
         "obs-handoff" => ["--endpoint", "--password-env", "--data-dir", "--output-directory", "--overlap-seconds", "--repeat", "--ffmpeg", "--ffprobe", "--output"],
@@ -61,6 +63,15 @@ try
             OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
             throw new ArgumentException("Output JSON must not overwrite the input video.");
         result = await new MediaProbe(Option("--ffprobe", MediaProbe.FindExecutable())).ProbeAsync(positional[0], shutdown.Token);
+    }
+    else if (args[0] == "cut-segments" && positional.Count == 1)
+    {
+        if (options.TryGetValue("--output", out var target) && string.Equals(Path.GetFullPath(target), Path.GetFullPath(positional[0]),
+            OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+            throw new ArgumentException("Output JSON must not overwrite the input request.");
+        var request = AtomicJsonFile.Read<CelesteRecHelper.Core.Models.SegmentCutRequest>(positional[0]);
+        result = await new SegmentCutter(Option("--ffmpeg", SegmentCutter.FindExecutable()),
+            Option("--ffprobe", MediaProbe.FindExecutable())).CutAsync(request, shutdown.Token);
     }
     else if (args[0] == "verify-handoff" && positional.Count == 1)
     {

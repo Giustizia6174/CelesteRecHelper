@@ -13,6 +13,7 @@ namespace Celeste.Mod.CelesteRecHelper;
 internal sealed class GameRecordingAdapter : IAsyncDisposable
 {
     private readonly ManifestStore store;
+    private readonly MediaWorkerClient mediaWorker;
     private RouteRun? current;
     private RouteRun? displayed;
     private Task closing = Task.CompletedTask;
@@ -20,9 +21,21 @@ internal sealed class GameRecordingAdapter : IAsyncDisposable
     private RecordingHud? hud;
     private bool disposed;
 
-    public GameRecordingAdapter(ManifestStore store)
+    public GameRecordingAdapter(ManifestStore store, string workerExecutable)
     {
         this.store = store;
+        mediaWorker = new MediaWorkerClient(store, workerExecutable);
+        closing = Task.Run(async () =>
+        {
+            try
+            {
+                var report = await new SegmentCutRecovery(store).RecoverAsync(mediaWorker.CutSegmentsAsync).ConfigureAwait(false);
+                Logger.Log(LogLevel.Info, "CelesteRecHelper",
+                    $"Cut recovery: {report.SucceededSegments} succeeded, {report.FailedSegments} failed, {report.RemovedReplays} replays removed.");
+                foreach (var warning in report.Warnings) Logger.Log(LogLevel.Warn, "CelesteRecHelper", warning);
+            }
+            catch (Exception e) { Logger.Log(LogLevel.Error, "CelesteRecHelper", $"Cut recovery failed: {e.Message}"); }
+        });
         Everest.Events.Level.OnEnter += OnEnter;
         Everest.Events.Level.OnExit += OnExit;
         Everest.Events.Level.OnComplete += OnComplete;
@@ -50,7 +63,7 @@ internal sealed class GameRecordingAdapter : IAsyncDisposable
         }
         CloseCurrent(false, Stopwatch.GetTimestamp());
         var settings = CelesteRecHelperModule.Settings;
-        var run = new RouteRun(store, session, identity,
+        var run = new RouteRun(store, mediaWorker, session, identity,
             Dialog.Clean(AreaData.Get(session.Area).Name), settings.ObsHost, settings.ObsPort,
             settings.ObsPassword, settings.OutputDirectory, closing);
         current = displayed = run;
@@ -109,11 +122,16 @@ internal sealed class GameRecordingAdapter : IAsyncDisposable
         var sameSession = run is not null && ReferenceEquals(run.GameSession, session);
         var sameIdentity = run?.Identity == identity;
         var disposition = RouteExitPolicy.Decide(ToGameplayExitMode(mode));
+        var completionNote = disposition == RouteExitDisposition.Complete && run is null &&
+            displayed is { ClosedAfterCompletion: true } previous && previous.Identity == identity &&
+            ReferenceEquals(previous.GameSession, session)
+            ? " Route already closed after completion tail."
+            : "";
         Logger.Log(LogLevel.Info, "CelesteRecHelper",
             $"Level exit: {mode}, identity {identity.MapSid} mode {identity.AreaMode}, slot {identity.SaveSlot}, " +
             $"level session {SessionTag(level.Session)}, event session {SessionTag(session)}, " +
             $"active session {SessionTag(run?.GameSession)}, session match {sameSession}, " +
-            $"route match {sameIdentity}, disposition {disposition}.");
+            $"route match {sameIdentity}, disposition {disposition}.{completionNote}");
         if (run is null || (!sameSession && !sameIdentity)) return;
         run.UseSession(session);
         if (disposition == RouteExitDisposition.Continue) return;
@@ -177,6 +195,7 @@ internal sealed class GameRecordingAdapter : IAsyncDisposable
     private sealed class RouteRun
     {
         private readonly ManifestStore store;
+        private readonly MediaWorkerClient mediaWorker;
         private readonly Guid routeId = Guid.NewGuid();
         private readonly CancellationTokenSource startupCancellation = new();
         private readonly Task startup;
@@ -191,15 +210,19 @@ internal sealed class GameRecordingAdapter : IAsyncDisposable
         private string endpoint = "";
         private RecordingFailure? reportedFailure;
         private int reportedSavedSegments;
+        private int reportedCutSegments;
+        private int reportedFailedCuts;
         public Session GameSession { get; private set; }
         public RouteIdentity Identity { get; }
         public GameplayEventGate Gate { get; } = new(Stopwatch.Frequency);
         public bool Ready => Volatile.Read(ref scheduler) is not null;
+        public bool ClosedAfterCompletion { get; private set; }
 
-        public RouteRun(ManifestStore store, Session gameSession, RouteIdentity identity, string name,
+        public RouteRun(ManifestStore store, MediaWorkerClient mediaWorker, Session gameSession, RouteIdentity identity, string name,
             string host, int port, string password, string directory, Task previousClose)
         {
             this.store = store;
+            this.mediaWorker = mediaWorker;
             GameSession = gameSession;
             Identity = identity;
             startup = Task.Run(async () =>
@@ -254,7 +277,8 @@ internal sealed class GameRecordingAdapter : IAsyncDisposable
                         SetFailure(RecordingFailureClassifier.Classify(e, RecordingFailureStage.Manifest));
                         return;
                     }
-                    var started = new ReplaySaveScheduler(new SegmentStateMachine(route, session.Id), capture, store.Save, this.endpoint);
+                    var started = new ReplaySaveScheduler(new SegmentStateMachine(route, session.Id), capture, store.Save, this.endpoint,
+                        cut: mediaWorker.CutSegmentsAsync);
                     Volatile.Write(ref scheduler, started);
                     Notice("rechelper_recording_started");
                     Logger.Log(LogLevel.Info, "CelesteRecHelper",
@@ -366,6 +390,14 @@ internal sealed class GameRecordingAdapter : IAsyncDisposable
                 reportedSavedSegments = status.SavedSegments;
                 Logger.Log(LogLevel.Info, "CelesteRecHelper", $"Route {routeId:N}: saved {status.SavedSegments}/{status.RecordedSegments} segments. Manifest: {store.GetManifestPath(routeId)}");
             }
+            if (status is not null && (status.CutSegments != reportedCutSegments || status.FailedCuts != reportedFailedCuts))
+            {
+                reportedCutSegments = status.CutSegments;
+                reportedFailedCuts = status.FailedCuts;
+                Logger.Log(status.FailedCuts > 0 ? LogLevel.Warn : LogLevel.Info, "CelesteRecHelper",
+                    $"Route {routeId:N}: cuts {status.CutSegments} ready, {status.PendingCuts} pending, {status.FailedCuts} failed. " +
+                    "Failed cuts retain their original replay; details are in the manifest and jobs directory.");
+            }
             var failure = status?.Failure;
             if (failure is null || failure == reportedFailure) return;
             reportedFailure = failure;
@@ -394,16 +426,20 @@ internal sealed class GameRecordingAdapter : IAsyncDisposable
             var title = Dialog.Clean(closed ? "rechelper_recording_ended" : Gate.Completing ? "rechelper_recording_tail" :
                 status is null ? "rechelper_recording_connecting" : "rechelper_recording_active");
             var message = Stopwatch.GetTimestamp() < Volatile.Read(ref noticeUntil) ? Dialog.Clean(Volatile.Read(ref notice)) : "";
-            return new RecordingHudView(title, Counts(status), message, false);
+            if (status?.FailedCuts > 0) message = Dialog.Clean("rechelper_recording_cut_failed");
+            else if (status?.PendingCuts > 0 && string.IsNullOrEmpty(message)) message = Dialog.Clean("rechelper_recording_cut_pending");
+            return new RecordingHudView(title, Counts(status), message, status?.FailedCuts > 0);
         }
 
         private static string Counts(ReplaySaveSnapshot? status) => status is null ? "" :
-            Dialog.Clean("rechelper_recording_counts") + $" {status.SavedSegments}/{status.RecordedSegments}";
+            Dialog.Clean("rechelper_recording_counts") + $" {status.SavedSegments}/{status.RecordedSegments}" + " / " +
+            Dialog.Clean("rechelper_recording_cut_counts") + $" {status.CutSegments}";
 
         public Task CloseAsync(bool completed, long timestamp) => closeTask ??= CloseCoreAsync(completed, timestamp);
         private async Task CloseCoreAsync(bool completed, long timestamp)
         {
             closed = true;
+            ClosedAfterCompletion = completed;
             if (completed && !Ready)
                 SetFailure(new RecordingFailure(RecordingFailureKind.Unknown, RecordingFailureStage.Start,
                     "rechelper_error_start_notready", "The chapter completed before the replay capture became ready."));

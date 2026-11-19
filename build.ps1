@@ -59,6 +59,13 @@ try {
     }
     & $dotnetCommand publish src/CelesteRecHelper.Worker/CelesteRecHelper.Worker.csproj --configuration $Configuration --no-restore --output (Join-Path $stageDirectory 'worker') --nologo
     if ($LASTEXITCODE -ne 0) { throw 'Worker publish failed.' }
+    $probeBinary = Join-Path $PSScriptRoot 'tools\ffprobe.exe'
+    if (Test-Path -LiteralPath $probeBinary) {
+        New-Item -ItemType Directory -Path (Join-Path $stageDirectory 'tools') -Force | Out-Null
+        Copy-Item -LiteralPath $probeBinary -Destination (Join-Path $stageDirectory 'tools') -Force
+        $license = Join-Path $PSScriptRoot 'tools\ffprobe-LICENSE.txt'
+        if (Test-Path -LiteralPath $license) { Copy-Item -LiteralPath $license -Destination (Join-Path $stageDirectory 'tools') -Force }
+    }
     if (-not $SkipDeploy) {
         $runningGame = Get-Process Celeste -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq (Join-Path $CelesteDirectory 'Celeste.exe') }
         if ($runningGame -and (Test-Path -LiteralPath $modDirectory)) {

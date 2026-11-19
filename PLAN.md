@@ -118,7 +118,13 @@ OBS 回放缓存是滚动窗口，满了会无提示地丢掉最旧画面。
   2. 能可靠估算的配置：用实际生效的上限算 `C`，取保守值。
   3. 每次保存后，用文件大小除以时长得到实际码率，修正 `C`。
   4. 无法可靠估算的配置：提前交接（缩小 `T`），并在连接检查里标"未验证"。
-- 首版支持的配置范围在阶段 2 实测后写回本文件。
+- 阶段 2 实测基线：OBS 32.2.2 / obs-websocket 5.7.4，320×180、30 FPS，独立便携配置：
+  - 简单输出：`RecQuality=Stream`、x264、MKV。回放保存成功，1 条音轨，实际缓存仅受时长上限限制。
+  - 高级输出：`RecType=Standard`、`RecEncoder=obs_x264`、CBR、MKV。回放保存成功，2 条音轨，实际缓存仅受时长上限限制。
+  - 两种模式的回放均位于对应录像目录；同时启动普通录制时，日志确认各自只初始化一个视频编码器。
+  - 2026-11-19 用户本机配置验收：高级输出、`h264_texture_amf`（AMD H.264）、1920×1080 / 60 FPS、MKV、1 条音轨，300 秒 / 512 MB。游戏菜单测试完成保存事件、新文件与 Worker 探测；根据本次素材实测码率，保守缓存估算约 181.1 秒，交接阈值约 126.8 秒。此配置与普通录制同时运行、编码器共用及交接覆盖范围仍待阶段 3 实测。
+  - 其他编码器、质量模式和封装尚未逐一实测。连接检查里的“估算已验证”表示已读取实际缓存限制（内存限额生效时另需实测码率），不代表所有输出组合均已完成兼容性测试。
+- 初始质量模式按 50 Mbps 估计内存窗口，保存探测后按实际文件码率加 50% 余量修正；未验证时交接阈值最多 30 秒。长片段是否无缺口仍由阶段 3 验证。
 - OBS 默认缓存 20 秒，太短。首次配置时提示用户调大（例如 5 分钟）。模组不自动修改 OBS 的缓存设置。
 
 ### 文件位置
@@ -159,7 +165,7 @@ OBS 回放缓存是滚动窗口，满了会无提示地丢掉最旧画面。
 
 ### 阶段 0：首版边界确认
 - [x] 片段规则、撤销范围、OBS 控制权、异常处理（本文件第二至六节）
-- [ ] 首版支持的 OBS 输出配置（阶段 2 实测后填写）
+- [x] 首版支持的 OBS 输出配置（阶段 2 已记录实测范围，见第四节）
 
 ### 阶段 1：环境、骨架、Core 数据模型与持久化
 - [x] 安装 .NET 8 SDK，确认本机 Everest 版本，对齐游戏程序集版本
@@ -187,13 +193,13 @@ CelesteRecHelper/
 ```
 
 ### 阶段 2：OBS 连接与最小 Worker
-- [ ] obs-websocket 5.x 客户端：连接、`Hello`/`Identify` 鉴权（SHA256）、请求/响应匹配、事件订阅、断线重连
-- [ ] 请求：`GetReplayBufferStatus`、`StartReplayBuffer`、`StopReplayBuffer`、`SaveReplayBuffer`、`GetLastReplayBufferReplay`、`StartRecord`、`StopRecord`、`GetRecordStatus`、`GetRecordDirectory`、`SetRecordDirectory`、`GetProfileParameter`
-- [ ] 事件：`ReplayBufferSaved`、`ReplayBufferStateChanged`、`RecordStateChanged`
-- [ ] 读取输出模式和缓存上限，实现第四节的估算
-- [ ] 最小 Worker：对保存出的文件运行 ffprobe，输出时长、首帧和末帧时间、各音轨信息
-- [ ] 连接检查菜单项：连接状态、回放缓存是否可用、估算的缓存时长、配置是否已验证
-- [ ] 在简单输出和高级输出下各测一次，确认缓存文件保存位置、编码器是否共用
+- [x] obs-websocket 5.x 客户端：连接、`Hello`/`Identify` 鉴权（SHA256）、请求/响应匹配、事件订阅、断线重连
+- [x] 请求：`GetReplayBufferStatus`、`StartReplayBuffer`、`StopReplayBuffer`、`SaveReplayBuffer`、`GetLastReplayBufferReplay`、`StartRecord`、`StopRecord`、`GetRecordStatus`、`GetRecordDirectory`、`SetRecordDirectory`、`GetProfileParameter`
+- [x] 事件：`ReplayBufferSaved`、`ReplayBufferStateChanged`、`RecordStateChanged`
+- [x] 读取输出模式和缓存上限，实现第四节的估算
+- [x] 最小 Worker：对保存出的文件运行 ffprobe，输出时长、首帧和末帧时间、各音轨信息
+- [x] 连接检查菜单项：连接状态、回放缓存是否可用、估算的缓存时长、配置是否已验证
+- [x] 在简单输出和高级输出下各测一次，确认缓存文件保存位置、编码器是否共用
 - 完成条件：能保存缓存、收到完成事件、取得文件并读出实际媒体信息
 
 ### 阶段 3：长片段交接验证
@@ -278,3 +284,6 @@ CelesteRecHelper/
   - 自定义输出目录时分别记录简单输出和高级输出的原目录及配置档。
   - Worker 合并统一中间片段参数并归零时间戳。
   - 开发顺序调整：最小 Worker 和长片段交接验证提前，菜单和界面完善放在核心流程之后。
+
+- 2026-11-18 阶段 1 已提交（`420ce1b`）。
+- 2026-11-19 阶段 2 完成：OBS RPC 1 客户端、连接检查/测试保存菜单、独立 Worker 媒体探测、目录恢复和缓存估算；简单/高级输出实测通过，44 项测试通过。用户本机（AMD H.264、1080p60）完成一次回放保存与 Worker 探测实测，实测码率约 15.8 Mbps。OBS 缓存保持 300 秒 / 512 MB 不变，按此码率交接阈值约 126.8 秒。游戏事件录制和长片段交接仍按后续阶段实施。

@@ -74,6 +74,7 @@ public sealed record MediaAsset
     public DateTimeOffset? SaveEventAtUtc { get; init; }
     // Recovery by directory/time is an inference, to be checked by the later media probe.
     public bool RecoveredAfterCrash { get; init; }
+    public MediaProbeResult? Probe { get; set; }
 }
 
 public sealed record ReplaySaveRequest

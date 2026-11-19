@@ -9,6 +9,7 @@ public sealed class CelesteRecHelperModule : EverestModule
     public static CelesteRecHelperModuleSettings Settings => (CelesteRecHelperModuleSettings)Instance._Settings;
     public ManifestStore? Manifests { get; private set; }
     public RecoveryReport? Recovery { get; private set; }
+    private ObsMenu? obsMenu;
 
     public CelesteRecHelperModule() => Instance = this;
 
@@ -19,8 +20,9 @@ public sealed class CelesteRecHelperModule : EverestModule
         {
             Manifests = new ManifestStore(Path.Combine(Everest.PathSettings, "CelesteRecHelper"));
             Recovery = new StartupRecovery(Manifests).Recover();
+            obsMenu = new ObsMenu(this);
             Logger.Log(LogLevel.Info, "CelesteRecHelper",
-                $"Stage 1 initialized. Data: {Manifests.RootDirectory}; interrupted routes: " +
+                $"Manifest storage initialized. Data: {Manifests.RootDirectory}; interrupted routes: " +
                 $"{Recovery.InterruptedRoutes.Count}; recovered saves: {Recovery.RecoveredSaves}; " +
                 $"failed saves: {Recovery.FailedSaves}; unfinished jobs: {Recovery.UnfinishedJobs.Count}.");
             foreach (var warning in Recovery.Warnings)
@@ -28,7 +30,7 @@ public sealed class CelesteRecHelperModule : EverestModule
             if (Recovery.OutputsMayStillBeActive)
                 Logger.Log(LogLevel.Warn, "CelesteRecHelper", "OBS may still have outputs running from the previous session. Check OBS before starting again.");
             if (Recovery.ObsDirectoryRecovery is not null)
-                Logger.Log(LogLevel.Warn, "CelesteRecHelper", "An OBS directory recovery record is pending. OBS connection support will restore it after checking the profile.");
+                Logger.Log(LogLevel.Warn, "CelesteRecHelper", "An OBS directory recovery record is pending. Use the OBS connection check to restore it after checking the profile.");
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
@@ -36,8 +38,16 @@ public sealed class CelesteRecHelperModule : EverestModule
         }
     }
 
+    public override void CreateModMenuSection(TextMenu menu, bool inGame, FMOD.Studio.EventInstance snapshot)
+    {
+        base.CreateModMenuSection(menu, inGame, snapshot);
+        obsMenu?.AddTo(menu);
+    }
+
     public override void Unload()
     {
+        obsMenu?.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        obsMenu = null;
         Recovery = null;
         Manifests = null;
     }

@@ -259,6 +259,25 @@ public sealed class ObsCaptureTests : IDisposable
         Assert.Empty(Directory.EnumerateFiles(workspace.Store.RootDirectory, "cleanup-error.json", SearchOption.AllDirectories));
     }
 
+    [Fact]
+    public async Task ExpiredBeforeSendPersistenceCallbackCannotDispatchAnObsSave()
+    {
+        var backend = new FakeOutputs(workspace);
+        await using var server = await ObsTestServer.StartAsync(backend.RunAsync);
+        await using var client = new ObsWebSocketClient(server.Endpoint);
+        await client.ConnectAsync();
+        var capture = new ObsCaptureSession(new ObsApi(client), workspace.Store);
+        await capture.StartAsync(server.Endpoint.AbsoluteUri);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => capture.SaveAsync(Guid.NewGuid(), async (_, ct) =>
+        {
+            var expired = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var registration = ct.Register(() => expired.TrySetResult());
+            await expired.Task;
+        }, TimeSpan.FromMilliseconds(100)));
+        Assert.DoesNotContain("SaveReplayBuffer", backend.Commands);
+        await capture.StopAsync(server.Endpoint.AbsoluteUri);
+    }
+
     private sealed class FakeOutputs(TestWorkspace workspace)
     {
         public int? ReplayStatusError { get; init; }

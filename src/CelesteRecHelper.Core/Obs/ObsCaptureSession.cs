@@ -88,7 +88,20 @@ public sealed class ObsCaptureSession(ObsApi api, ManifestStore store)
         finally { operation.Release(); }
     }
 
-    public async Task<SavedReplay> SaveAsync(TimeSpan? timeout = null, CancellationToken ct = default)
+    public Task<SavedReplay> SaveAsync(TimeSpan? timeout = null, CancellationToken ct = default) =>
+        SaveCoreAsync(null, null, timeout, ct);
+
+    /// <summary>The callback must persist the exact request and file snapshot before any save RPC is sent.</summary>
+    public Task<SavedReplay> SaveAsync(Guid obsSessionId, Func<ReplaySaveRequest, CancellationToken, Task> beforeSend,
+        TimeSpan? timeout = null, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(beforeSend);
+        if (obsSessionId == Guid.Empty) throw new ArgumentException("An OBS session ID is required.", nameof(obsSessionId));
+        return SaveCoreAsync(obsSessionId, beforeSend, timeout, ct);
+    }
+
+    private async Task<SavedReplay> SaveCoreAsync(Guid? obsSessionId,
+        Func<ReplaySaveRequest, CancellationToken, Task>? beforeSend, TimeSpan? timeout, CancellationToken ct)
     {
         await operation.WaitAsync(ct).ConfigureAwait(false);
         try
@@ -120,9 +133,21 @@ public sealed class ObsCaptureSession(ObsApi api, ManifestStore store)
             api.Client.EventReceived += OnEvent;
             api.Client.StateChanged += OnState;
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            deadline.CancelAfter(timeout ?? TimeSpan.FromSeconds(10));
+            var duration = timeout ?? TimeSpan.FromSeconds(10);
+            deadline.CancelAfter(duration);
             try
             {
+                if (beforeSend is not null)
+                    await beforeSend(new ReplaySaveRequest
+                    {
+                        ObsSessionId = obsSessionId!.Value, ExpectedDirectory = outputDirectory,
+                        RequestedAtTimestamp = requested, RequestedAtUtc = utc, DeadlineUtc = utc + duration,
+                        ExistingFiles = existing.ToList()
+                    }, deadline.Token).ConfigureAwait(false);
+                // Persistence may take time; refuse a late or reconnected dispatch.
+                deadline.Token.ThrowIfCancellationRequested();
+                if (api.Client.ConnectionId != connectionId)
+                    throw new IOException("OBS reconnected before the replay request was dispatched.");
                 await api.SaveReplayBufferAsync(deadline.Token).ConfigureAwait(false);
                 var message = await completion.Task.WaitAsync(deadline.Token).ConfigureAwait(false);
                 var path = Path.GetFullPath(message.Data.GetProperty("savedReplayPath").GetString()!);

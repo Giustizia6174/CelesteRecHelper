@@ -17,6 +17,7 @@ public sealed class SegmentStateMachine
     private readonly ObsSession session;
     private long lastGameplayTimestamp;
     public RouteManifest Route => route;
+    public Guid ObsSessionId => session.Id;
 
     public SegmentStateMachine(RouteManifest route, Guid obsSessionId)
     {
